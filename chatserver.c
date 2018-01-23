@@ -193,8 +193,10 @@ clients_timeout_check(Client **clients)
    Client *c = clients[0];
    while (c)
      {
-        if ((c->state != CLIENT_STATE_AUTHENTICATED && c->unixtime < time(NULL) - CLIENT_TIMEOUT) ||
-            (c->state == CLIENT_STATE_AUTHENTICATED && c->unixtime < time(NULL) - (CLIENT_TIMEOUT * 100)))
+        if ((c->state != CLIENT_STATE_AUTHENTICATED &&
+             c->unixtime < time(NULL) - CLIENT_TIMEOUT) ||
+            (c->state == CLIENT_STATE_AUTHENTICATED &&
+             c->unixtime < time(NULL) - (CLIENT_TIMEOUT * 100)))
           {
              clients_del(clients, c);
              c = clients[0];
@@ -203,6 +205,27 @@ clients_timeout_check(Client **clients)
         c = c->next;
      }
 }
+
+static bool
+_username_valid(const char *username)
+{
+   int i;
+   ssize_t len = strlen(username);
+
+   if (len > 32)
+     return false;
+
+   for (i = 0; i < len; i++)
+     {
+        if (isspace(username[i]))
+          {
+             return false;
+          }
+     }
+
+   return true;
+}
+
 
 static bool
 clients_username_exists(Client **clients, const char *username)
@@ -235,24 +258,14 @@ client_command_success(Client *client)
 static void
 client_authenticate(Client **clients, Client *client)
 {
+   char *potential;
+
    if (!strncasecmp(client->data, "NICK ", 5))
      {
-        char *potential = strchr(client->data, ' ') + 1;
+        potential = strchr(client->data, ' ') + 1;
         if (potential)
           {
-             char *end = strrchr(potential, ' '); if (end) *end = '\0';
-             if (isspace(potential[0]))
-               {
-                  client_command_fail(client);
-                  return;
-               }
-
-             if (clients_username_exists(clients, potential))
-               {
-                  client_command_fail(client); 
-                  return;
-               }
-             else
+             if (!clients_username_exists(clients, potential) && _username_valid(potential))
                {
                   snprintf(client->username, sizeof(client->username), "%s", potential);
                   client->state = CLIENT_STATE_AUTHENTICATED;
@@ -300,7 +313,6 @@ client_read(Client *client)
    return bytes;
 }
 
-
 static void
 clients_active_list(Client **clients, int fd)
 {
@@ -342,17 +354,22 @@ client_message_send(Client **clients, Client *client)
    *end = '\0';
 
    msg = end + 1;
+   if (!msg)
+     {
+        client_command_fail(client);
+        return;
+     }
 
    dest = client_by_username(clients, to);
-   if (dest)
+   if (!dest)
+     {
+        client_command_fail(client);
+     }
+   else
      {
         snprintf(buf, sizeof(buf), "%s says: %s\r\n", client->username, msg);
         write(dest->fd, buf, strlen(buf));
         client_command_success(client);
-     }
-   else
-     {
-        client_command_fail(client);
      }
 #if defined(DEBUG)
    printf("user: %s says: %s to: %s\n", client->username, msg, to);
@@ -362,36 +379,38 @@ client_message_send(Client **clients, Client *client)
 static void
 client_help_send(Client *client)
 {
-   const char *request, *commands = "QUIT, NICK, LIST, MSG, HELP.";
    char desc[4096];
+   const char *request, *commands = "QUIT, NICK, LIST, MSG, HELP.";
 
-   write(client->fd, "\r\n\r\n", 4);
+   write(client->fd, "\r\n", 2);
 
    request = strchr(client->data, ' '); 
-   if (!request)
+   if (!request || !request[0] || !request[1])
      {
-        snprintf(desc, sizeof(desc), "available commands: %s\r\n\r\n", commands);
+        snprintf(desc, sizeof(desc), "available commands: %s\r\n", commands);
+        write(client->fd, desc, strlen(desc));
+        return;
+     }
+
+   request += 1;
+
+   if (!strncasecmp(request, "NICK", 4))
+     {
+        snprintf(desc, sizeof(desc), "NICK <USERNAME>.\r\n");
+     }
+   else if (!strncasecmp(request, "LIST", 4))
+     {
+        snprintf(desc, sizeof(desc), "LIST: list authenticated users.\r\n");
+     }
+   else if (!strncasecmp(request, "MSG", 3))
+     {
+        snprintf(desc, sizeof(desc), "MSG <USERNAME> <MESSAGE>.\r\n");
+     }
+   else if (!strncasecmp(request, "QUIT", 4))
+     {
+        snprintf(desc, sizeof(desc), "QUIT: quit this session.\r\n");
      }
    else
-     request += 1;
-
-   if (request && !strncasecmp(request, "NICK", 4))
-     {
-        snprintf(desc, sizeof(desc), "NICK <USERNAME>.\r\n\r\n");
-     }
-   else if (request && !strncasecmp(request, "LIST", 4))
-     {
-        snprintf(desc, sizeof(desc), "LIST: list authenticated users.\r\n\r\n");
-     }
-   else if (request && !strncasecmp(request, "MSG", 3))
-     {
-        snprintf(desc, sizeof(desc), "MSG <USERNAME> <MESSAGE>.\r\n\r\n");
-     }
-   else if (request && !strncasecmp(request, "QUIT", 4))
-     {
-        snprintf(desc, sizeof(desc), "QUIT: quit this session.\r\n\r\n");
-     }
-   else if (request)
      {
         client_command_fail(client);
         return;
@@ -436,13 +455,14 @@ client_request(Client **clients, Client *client)
      {
         clients_active_list(clients, client->fd);
      }
-   else if (client->state != CLIENT_STATE_AUTHENTICATED)
-     {
-        client_authenticate(clients, client);
-     }
    else if (!strncasecmp(client->data, "MSG ", 4))
      {
         client_message_send(clients, client);
+     }
+   else if (!strncasecmp(client->data, "NICK", 4) &&
+            client->state != CLIENT_STATE_AUTHENTICATED)
+     {
+        client_authenticate(clients, client);
      }
    else
      {
