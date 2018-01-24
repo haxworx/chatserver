@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <ctype.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <time.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -92,13 +91,13 @@ server_motd_get()
    return motd;
 }
 
-static void
+static bool
 server_motd_client_send(Client *client)
 {
    ssize_t total, size, bytes;
    const char *motd = server_motd_get();
 
-   if (!motd) return;
+   if (!motd) return false;
 
    total = 0;
    size = strlen(motd);
@@ -111,12 +110,14 @@ server_motd_client_send(Client *client)
           {
              if (errno == EAGAIN || errno == EINTR) {}
              else
-               return;
+               return false;
           }
         size -= bytes;
         total += bytes;
      }
    write(client->fd, "\r\n\r\n", 4);
+
+   return true;
 }
 
 static void
@@ -136,12 +137,9 @@ server_shutdown(void)
 static Client *
 clients_add(Client **clients, int fd, uint32_t unixtime)
 {
-   int flags;
    Client *c;
 
    FD_SET(fd, &_active_fd_set);
-   flags = fcntl(fd, F_GETFL, 0);
-   fcntl(fd, F_SETFL, O_NONBLOCK | flags);
 
    c = clients[0];
    if (c == NULL)
@@ -260,7 +258,7 @@ _username_valid(const char *username)
    int i;
    ssize_t len = strlen(username);
 
-   if (len > 32)
+   if (!len || len > 32)
      return false;
 
    for (i = 0; i < len; i++)
@@ -292,7 +290,7 @@ clients_username_exists(Client **clients, const char *username)
 }
 
 static void
-client_command_fail(Client *client)
+client_command_failure(Client *client)
 {
    write(client->fd, "FAIL!\r\n", 7);
 }
@@ -303,7 +301,7 @@ client_command_success(Client *client)
    write(client->fd, "OK!\r\n", 5);
 }
 
-static void
+static bool
 client_authenticate(Client **clients, Client *client)
 {
    char *potential;
@@ -313,18 +311,17 @@ client_authenticate(Client **clients, Client *client)
         potential = strchr(client->data, ' ') + 1;
         if (potential)
           {
-             if (!clients_username_exists(clients, potential) && _username_valid(potential))
+             if (_username_valid(potential) &&
+                 !clients_username_exists(clients, potential))
                {
                   snprintf(client->username, sizeof(client->username), "%s", potential);
                   client->state = CLIENT_STATE_AUTHENTICATED;
-
-                  client_command_success(client);
-                  return;
+                  return true;
                }
           }
      }
 
-   client_command_fail(client);
+   return false;
 }
 
 static int
@@ -376,10 +373,9 @@ clients_active_list(Client **clients, Client *client)
      }
 
    write(client->fd, "\r\n", 2);
-   client_command_success(client);
 }
 
-static void
+static bool
 client_message_send(Client **clients, Client *client)
 {
    Client *dest;
@@ -387,48 +383,33 @@ client_message_send(Client **clients, Client *client)
    char buf[4096];
 
    to = strchr(client->data, ' ') + 1;
-   if (!to)
-     {
-        client_command_fail(client);     
-        return;
-     }
+   if (!to) return false;
 
    end = strchr(to, ' ');
-   if (!end)
-     {
-        client_command_fail(client);
-        return;
-     }
+   if (!end) return false;
 
    *end = '\0';
 
    msg = end + 1;
-   if (!msg)
-     {
-        client_command_fail(client);
-        return;
-     }
+   if (!msg) return false;
 
    dest = client_by_username(clients, to);
-   if (!dest)
-     {
-        client_command_fail(client);
-        return;
-     }
+   if (!dest) return false;
 
    snprintf(buf, sizeof(buf), "%s says: %s\r\n", client->username, msg);
    write(dest->fd, buf, strlen(buf));
-   client_command_success(client);
 #if defined(DEBUG)
    printf("user: %s says: %s to: %s\n", client->username, msg, to);
 #endif
+
+   return true;
 }
 
-static void
+static bool
 client_help_send(Client *client)
 {
    char desc[4096];
-   const char *request, *commands = "QUIT, NICK, LIST, MSG, HELP.";
+   const char *request, *commands = "QUIT, NICK, LIST, MSG, MOTD, HELP.";
 
    write(client->fd, "\r\n", 2);
 
@@ -437,8 +418,7 @@ client_help_send(Client *client)
      {
         snprintf(desc, sizeof(desc), "available commands: %s\r\n", commands);
         write(client->fd, desc, strlen(desc));
-        client_command_success(client);
-        return;
+        return true;
      }
 
    request += 1;
@@ -455,18 +435,22 @@ client_help_send(Client *client)
      {
         snprintf(desc, sizeof(desc), "MSG <USERNAME> <MESSAGE>.\r\n");
      }
+   else if (!strcasecmp(request, "MOTD"))
+     {
+        snprintf(desc, sizeof(desc), "MOTD: show message of the day.\r\n");
+     }
    else if (!strcasecmp(request, "QUIT"))
      {
         snprintf(desc, sizeof(desc), "QUIT: quit this session.\r\n");
      }
    else
      {
-        client_command_fail(client);
-        return;
+        return false;
      }
   
    write(client->fd, desc, strlen(desc));
-   client_command_success(client);
+
+   return true;
 }
 
 static void
@@ -488,40 +472,49 @@ _client_data_free(Client *client)
    client->len = 0;
 }
 
-static int
+static bool
 client_request(Client **clients, Client *client)
 {
+   const char *request;
+   bool success = true;
+
    _client_data_trim(client);
 
-   if (!strcasecmp(client->data, "QUIT"))
+   request = client->data;
+
+   if (!strcasecmp(request, "QUIT"))
      {
         client->state = CLIENT_STATE_DISCONNECT;
      }
-   else if (!strncasecmp(client->data, "HELP", 4))
+   else if (!strncasecmp(request, "HELP", 4))
      {
-        client_help_send(client);
+        success = client_help_send(client);
      }
-   else if (!strcasecmp(client->data, "LIST"))
+   else if (!strcasecmp(request, "MOTD"))
+     {
+        success = server_motd_client_send(client);
+     }
+   else if (!strcasecmp(request, "LIST"))
      {
         clients_active_list(clients, client);
      }
-   else if (!strncasecmp(client->data, "MSG ", 4))
+   else if (!strncasecmp(request, "MSG ", 4))
      {
-        client_message_send(clients, client);
+        success = client_message_send(clients, client);
      }
-   else if (!strncasecmp(client->data, "NICK", 4) &&
+   else if (!strncasecmp(request, "NICK", 4) &&
             client->state != CLIENT_STATE_AUTHENTICATED)
      {
-        client_authenticate(clients, client);
+        success = client_authenticate(clients, client);
      }
    else
      {
-        client_command_fail(client);
+        success = false;
      }
 
    _client_data_free(client);
 
-   return client->state;
+   return success;
 }
 
 static void
@@ -562,7 +555,7 @@ int main(int argc, char **argv)
    struct sockaddr_in servername, clientname;
    int sock, in, i;
    socklen_t size;
-   int flags, res, reuseaddr = 1;
+   int res, reuseaddr = 1;
    sigset_t newmask, oldmask;
    struct sigaction newaction, oldaction;
    struct timeval tv;
@@ -595,9 +588,6 @@ int main(int argc, char **argv)
          exit(ERR_BIND_FAILED);
      }
    
-   flags = fcntl(sock, F_GETFL, 0);
-   fcntl(sock, flags | O_NONBLOCK);
-
    if (listen(sock, 5) < 0)
      {
         exit(ERR_LISTEN_FAILED);
@@ -674,7 +664,11 @@ int main(int argc, char **argv)
                      }
                    else if (res > 0)
                      {
-                        client_request(clients, client);
+                        if (client_request(clients, client))
+                          client_command_success(client);
+                        else
+                          client_command_failure(client);
+
                         switch (client->state)
                           {
                              case CLIENT_STATE_DISCONNECT:
