@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -15,6 +16,8 @@
 #include <netinet/in.h>
 
 static bool enabled = true;
+
+#define SERVER_MOTD_FILE_PATH "./MOTD"
 
 typedef enum {
    ERR_SOCKET_FAILED     = (1 << 0),
@@ -49,52 +52,96 @@ struct Client {
 
 static fd_set _active_fd_set;
 
-static void
-_file_contents_send(int fd, const char *path)
+static char *
+server_motd_get()
 {
+   const char *path = SERVER_MOTD_FILE_PATH;
    FILE *f;
    struct stat st;
+   int size;
    char buffer[4096];
-   int count, size;
-   ssize_t bytes;
+   ssize_t bytes, total = 0;
+   static char *motd = NULL;
+
+   if (motd) return motd;
 
    if (stat(path, &st) < 0)
-     return;
-
-   f = fopen(path, "rb");
-   if (!f)
-     return;
+     return NULL;
 
    size = st.st_size;
- 
+
+   if (!size) return NULL;
+
+   f = fopen(path, "rb");
+   if (!f) return NULL;
+
+   motd = malloc(size * sizeof(char) + 1);
+
    while (size)
      {
-        count = fread(buffer, 1, sizeof(buffer), f);
-        bytes = write(fd, buffer, count);
-        if (bytes < count || bytes == 0)
-          break;
-        if (bytes < 0)
-          exit(1 << 8);
-
+        bytes = fread(buffer, 1, sizeof(buffer), f);
+        total += bytes;
+        memcpy(&motd[total - bytes], buffer, bytes);
         size -= bytes;
      }
 
+   motd[total] = 0x00;
+
    fclose(f);
 
-   write(fd, "\r\n\r\n", 4);
+   return motd;
 }
 
 static void
+server_motd_client_send(Client *client)
+{
+   ssize_t total, size, bytes;
+   const char *motd = server_motd_get();
+
+   if (!motd) return;
+
+   total = 0;
+   size = strlen(motd);
+
+   while (size)
+     {
+        bytes = write(client->fd, &motd[total], size);
+        if (bytes == 0) break;
+        if (bytes < 0)
+          {
+             if (errno == EAGAIN || errno == EINTR) {}
+             else
+               return;
+          }
+        size -= bytes;
+        total += bytes;
+     }
+   write(client->fd, "\r\n\r\n", 4);
+}
+
+static void
+server_init(void)
+{
+   server_motd_get();
+}
+
+static void
+server_shutdown(void)
+{
+   char *motd = server_motd_get();
+   if (motd)
+     free(motd);
+}
+
+static Client *
 clients_add(Client **clients, int fd, uint32_t unixtime)
 {
    int flags;
-   Client *c = clients[0];
+   Client *c;
 
    FD_SET(fd, &_active_fd_set);
    flags = fcntl(fd, F_GETFL, 0);
-   fcntl(fd, flags | O_NONBLOCK, F_SETFL);
-
-   _file_contents_send(fd, "MOTD");
+   fcntl(fd, F_SETFL, O_NONBLOCK | flags);
 
    c = clients[0];
    if (c == NULL)
@@ -102,7 +149,7 @@ clients_add(Client **clients, int fd, uint32_t unixtime)
         clients[0] = c = calloc(1, sizeof(Client));
         c->fd = fd;
         c->unixtime = unixtime;
-        return;
+        return c;
      }
 
    while (c->next)
@@ -115,12 +162,14 @@ clients_add(Client **clients, int fd, uint32_t unixtime)
         c->fd = fd;
         c->unixtime = unixtime;
      }
+
+   return c;
 }
 
 static void
 clients_del(Client **clients, Client *client)
 {
-   Client *c = clients[0];
+   Client *c, *prev;
    const char *goodbye = "Bye now!\r\n\r\n";
 
    write(client->fd, goodbye, strlen(goodbye));
@@ -128,7 +177,8 @@ clients_del(Client **clients, Client *client)
    FD_CLR(client->fd, &_active_fd_set);
    close(client->fd);
 
-   Client *prev = NULL;
+   prev = NULL;
+   c = clients[0];
    while (c)
      {
         if (c == client)
@@ -158,10 +208,8 @@ client_by_username(Client **clients, const char *username)
    Client *c = clients[0];
    while (c)
      {
-        if (c->state != CLIENT_STATE_AUTHENTICATED)
-          continue;
-
-        if (!strcasecmp(username, c->username))
+        if (c->state == CLIENT_STATE_AUTHENTICATED &&
+            !strcasecmp(username, c->username))
           {
              return c;
           }
@@ -226,14 +274,14 @@ _username_valid(const char *username)
    return true;
 }
 
-
 static bool
 clients_username_exists(Client **clients, const char *username)
 {
    Client *c = clients[0];
    while (c)
      {
-        if (!strcasecmp(username, c->username))
+        if (c->state == CLIENT_STATE_AUTHENTICATED &&
+            !strcasecmp(username, c->username))
           {
              return true;
           }
@@ -314,20 +362,21 @@ client_read(Client *client)
 }
 
 static void
-clients_active_list(Client **clients, int fd)
+clients_active_list(Client **clients, Client *client)
 {
    Client *c = clients[0];
    while (c)
      {
         if (c->state == CLIENT_STATE_AUTHENTICATED)
           {
-             write(fd, c->username, strlen(c->username));
-             write(fd, " ", 1);
+             write(client->fd, c->username, strlen(c->username));
+             write(client->fd, " ", 1);
           }
         c = c->next;
      }
 
-   write(fd, "\r\n", 2);
+   write(client->fd, "\r\n", 2);
+   client_command_success(client);
 }
 
 static void
@@ -364,13 +413,12 @@ client_message_send(Client **clients, Client *client)
    if (!dest)
      {
         client_command_fail(client);
+        return;
      }
-   else
-     {
-        snprintf(buf, sizeof(buf), "%s says: %s\r\n", client->username, msg);
-        write(dest->fd, buf, strlen(buf));
-        client_command_success(client);
-     }
+
+   snprintf(buf, sizeof(buf), "%s says: %s\r\n", client->username, msg);
+   write(dest->fd, buf, strlen(buf));
+   client_command_success(client);
 #if defined(DEBUG)
    printf("user: %s says: %s to: %s\n", client->username, msg, to);
 #endif
@@ -385,28 +433,29 @@ client_help_send(Client *client)
    write(client->fd, "\r\n", 2);
 
    request = strchr(client->data, ' '); 
-   if (!request || !request[0] || !request[1])
+   if (!request || !request[0])
      {
         snprintf(desc, sizeof(desc), "available commands: %s\r\n", commands);
         write(client->fd, desc, strlen(desc));
+        client_command_success(client);
         return;
      }
 
    request += 1;
 
-   if (!strncasecmp(request, "NICK", 4))
+   if (!strcasecmp(request, "NICK"))
      {
         snprintf(desc, sizeof(desc), "NICK <USERNAME>.\r\n");
      }
-   else if (!strncasecmp(request, "LIST", 4))
+   else if (!strcasecmp(request, "LIST"))
      {
         snprintf(desc, sizeof(desc), "LIST: list authenticated users.\r\n");
      }
-   else if (!strncasecmp(request, "MSG", 3))
+   else if (!strcasecmp(request, "MSG"))
      {
         snprintf(desc, sizeof(desc), "MSG <USERNAME> <MESSAGE>.\r\n");
      }
-   else if (!strncasecmp(request, "QUIT", 4))
+   else if (!strcasecmp(request, "QUIT"))
      {
         snprintf(desc, sizeof(desc), "QUIT: quit this session.\r\n");
      }
@@ -417,6 +466,7 @@ client_help_send(Client *client)
      }
   
    write(client->fd, desc, strlen(desc));
+   client_command_success(client);
 }
 
 static void
@@ -453,7 +503,7 @@ client_request(Client **clients, Client *client)
      }
    else if (!strcasecmp(client->data, "LIST"))
      {
-        clients_active_list(clients, client->fd);
+        clients_active_list(clients, client);
      }
    else if (!strncasecmp(client->data, "MSG ", 4))
      {
@@ -553,6 +603,10 @@ int main(int argc, char **argv)
         exit(ERR_LISTEN_FAILED);
      }
 
+   /* Initialise before main loop */
+
+   server_init();
+
    clients = calloc(1, sizeof(Client *));
 
    /* Handle SIGINT gracefully */
@@ -605,7 +659,8 @@ int main(int argc, char **argv)
                         exit(ERR_ACCEPT_FAILED);
                      }
 
-                   clients_add(clients, in, time(NULL));
+                   client = clients_add(clients, in, time(NULL));
+                   server_motd_client_send(client);
                 }
               else 
                 {
@@ -637,6 +692,8 @@ int main(int argc, char **argv)
 
    clients_free(clients);
    close(sock);
+
+   server_shutdown();
 
    return EXIT_SUCCESS;
 }
