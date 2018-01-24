@@ -4,6 +4,7 @@
 #include <string.h>
 #include <strings.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <ctype.h>
 #include <unistd.h>
 #include <time.h>
@@ -551,7 +552,7 @@ _sig_int_cb(int sig)
 int main(int argc, char **argv)
 {
    Client **clients, *client;
-   int port;
+   int port, flags;
    struct sockaddr_in servername, clientname;
    int sock, in, i;
    socklen_t size;
@@ -582,6 +583,9 @@ int main(int argc, char **argv)
      {
         exit(ERR_SETSOCKOPT_FAILED);
      }
+
+   flags = fcntl(sock, F_GETFL, 0);
+   fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
    if (bind(sock, (struct sockaddr *) &servername, sizeof(servername)) < 0)
      {
