@@ -15,6 +15,8 @@
 #include <netdb.h>
 #include <netinet/in.h>
 
+// TODO: PASS socket TO/FROM for file transfer
+
 static bool enabled = true;
 
 #define SERVER_MOTD_FILE_PATH "./MOTD"
@@ -30,7 +32,8 @@ typedef enum {
 
 #define SECOND 1000000
 #define CLIENT_TIMEOUT_CHECK SECOND / 4
-#define CLIENT_TIMEOUT 10
+#define CLIENT_TIMEOUT_CONNECTION 10
+#define CLIENT_TIMEOUT_AUTHENTICATED 180
 
 typedef enum {
    CLIENT_STATE_CONNECTED     = (0 << 0),
@@ -241,9 +244,9 @@ clients_timeout_check(Client **clients)
    while (c)
      {
         if ((c->state != CLIENT_STATE_AUTHENTICATED &&
-             c->unixtime < time(NULL) - CLIENT_TIMEOUT) ||
+             c->unixtime < time(NULL) - CLIENT_TIMEOUT_CONNECTION) ||
             (c->state == CLIENT_STATE_AUTHENTICATED &&
-             c->unixtime < time(NULL) - (CLIENT_TIMEOUT * 100)))
+             c->unixtime < time(NULL) - (CLIENT_TIMEOUT_AUTHENTICATED)))
           {
              clients_del(clients, c);
              c = clients[0];
@@ -426,19 +429,19 @@ client_help_send(Client *client)
 
    if (!strcasecmp(request, "NICK"))
      {
-        snprintf(desc, sizeof(desc), "NICK <USERNAME>.\r\n");
+        snprintf(desc, sizeof(desc), "NICK: login with desired username.\r\n");
      }
    else if (!strcasecmp(request, "LIST"))
      {
-        snprintf(desc, sizeof(desc), "LIST: list authenticated users.\r\n");
+        snprintf(desc, sizeof(desc), "LIST: list connected and active users.\r\n");
      }
    else if (!strcasecmp(request, "MSG"))
      {
-        snprintf(desc, sizeof(desc), "MSG <USERNAME> <MESSAGE>.\r\n");
+        snprintf(desc, sizeof(desc), "MSG: send message to desired user.\r\n");
      }
    else if (!strcasecmp(request, "MOTD"))
      {
-        snprintf(desc, sizeof(desc), "MOTD: show message of the day.\r\n");
+        snprintf(desc, sizeof(desc), "MOTD: view server's message of the day.\r\n");
      }
    else if (!strcasecmp(request, "QUIT"))
      {
