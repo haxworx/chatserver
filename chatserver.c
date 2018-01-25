@@ -389,6 +389,9 @@ client_message_send(Client **clients, Client *client)
    char *to, *msg, *end;
    char buf[4096];
 
+   if (client->state != CLIENT_STATE_AUTHENTICATED)
+     return false;
+
    to = strchr(client->data, ' ') + 1;
    if (!to) return false;
 
@@ -403,7 +406,7 @@ client_message_send(Client **clients, Client *client)
    dest = client_by_username(clients, to);
    if (!dest) return false;
 
-   snprintf(buf, sizeof(buf), "%s says: %s\r\n", client->username, msg);
+   snprintf(buf, sizeof(buf), "\r\n%s says: %s\r\n", client->username, msg);
    write(dest->fd, buf, strlen(buf));
 #if defined(DEBUG)
    printf("user: %s says: %s to: %s\n", client->username, msg, to);
@@ -676,14 +679,6 @@ transfer_client_process_new(Client **clients, Client *client, void (*new_process
 }
 
 static void
-client_prompt_send(Client *c)
-{
-   const char *prompt = "> ";
-
-   write(c->fd, prompt, strlen(prompt));
-}
-
-static void
 usage(void)
 {
    printf("server <port>\n");
@@ -816,7 +811,6 @@ int main(int argc, char **argv)
 
                    client = clients_add(clients, returner, time(NULL));
                    server_motd_client_send(client);
-                   client_prompt_send(client);
                 }
               else if (i == sock)
                 {
@@ -829,7 +823,6 @@ int main(int argc, char **argv)
 
                    client = clients_add(clients, in, time(NULL));
                    server_motd_client_send(client);
-                   client_prompt_send(client);
                 }
               else 
                 {
@@ -848,7 +841,6 @@ int main(int argc, char **argv)
                         else
                           client_command_failure(client);
 
-                        client_prompt_send(client);
                         switch (client->state)
                           {
                              case CLIENT_STATE_TRANSFER:
