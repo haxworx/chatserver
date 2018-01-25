@@ -12,14 +12,14 @@
 #include <sys/stat.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netdb.h>
 #include <netinet/in.h>
 
-// TODO: PASS socket TO/FROM for file transfer
+#define SERVER_SOCKET_PATH "./socket"
+#define SERVER_MOTD_FILE_PATH "./MOTD"
 
 static bool enabled = true;
-
-#define SERVER_MOTD_FILE_PATH "./MOTD"
 
 typedef enum {
    ERR_SOCKET_FAILED     = (1 << 0),
@@ -38,7 +38,9 @@ typedef enum {
 typedef enum {
    CLIENT_STATE_CONNECTED     = (0 << 0),
    CLIENT_STATE_AUTHENTICATED = (1 << 0),
-   CLIENT_STATE_DISCONNECT    = (1 << 1)
+   CLIENT_STATE_DISCONNECT    = (1 << 1),
+   CLIENT_STATE_TRANSFER      = (1 << 2),
+   CLIENT_STATE_IGNORE        = (1 << 3),
 } Client_State;
 
 typedef struct Client Client;
@@ -127,6 +129,7 @@ server_motd_client_send(Client *client)
 static void
 server_init(void)
 {
+   unlink(SERVER_SOCKET_PATH);
    server_motd_get();
 }
 
@@ -490,6 +493,13 @@ client_request(Client **clients, Client *client)
      {
         client->state = CLIENT_STATE_DISCONNECT;
      }
+   else if (!strcasecmp(request, "TRANSFER"))
+     {
+        if (client->state == CLIENT_STATE_AUTHENTICATED)
+          client->state = CLIENT_STATE_TRANSFER;
+        else
+          success = false;
+     }
    else if (!strncasecmp(request, "HELP", 4))
      {
         success = client_help_send(client);
@@ -540,6 +550,140 @@ clients_free(Client **clients)
 }
 
 static void
+_socket_pass(int socket, int fd)
+{
+   struct cmsghdr *cmsg;
+   struct msghdr msg = { 0 };
+   char buf[CMSG_SPACE(sizeof(int))];
+   memset(buf, 0, sizeof(buf));
+
+   struct iovec io;
+   io.iov_base  = "";
+   io.iov_len = 1;
+
+   msg.msg_iov = &io;
+   msg.msg_iovlen = 1;
+   msg.msg_control = buf;
+   msg.msg_controllen = sizeof(buf);
+
+   cmsg = CMSG_FIRSTHDR(&msg);
+   cmsg->cmsg_level = SOL_SOCKET;
+   cmsg->cmsg_type = SCM_RIGHTS;
+   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+
+   memmove(CMSG_DATA(cmsg), &fd, sizeof(int));
+   msg.msg_controllen = cmsg->cmsg_len;
+
+   sendmsg(socket, &msg, 0);
+}
+
+static int
+_socket_catch(int socket)
+{
+   struct cmsghdr *cmsg;
+   int fd;
+   struct msghdr msg = { 0 };
+   char m_buffer[1], c_buffer[512];
+   struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
+
+   msg.msg_iov = &io;
+   msg.msg_iovlen = 1;
+   msg.msg_control = c_buffer;
+   msg.msg_controllen = sizeof(c_buffer);
+
+   if (recvmsg(socket, &msg, 0) < 0) return -1;
+
+   cmsg = CMSG_FIRSTHDR(&msg);
+
+   memmove(&fd, CMSG_DATA(cmsg), sizeof(int));
+
+   return fd;
+}
+
+static void
+_twilight_zone(int fd)
+{
+   const char *msg = "You are in the twilight zone!!!\r\n";
+   char buf[1024];
+   ssize_t len;
+
+   write(fd, msg, strlen(msg));
+   len = read(fd, buf, sizeof(buf) -1);
+   buf[len] = 0x00;
+   printf("client returns from twilight zone!!!\n");
+}
+
+static void
+return_socket_main_proc(int fd)
+{
+   struct sockaddr_un unixname;
+   int sock;
+
+   if ((sock = socket(AF_UNIX, SOCK_DGRAM, 0)) < 0)
+     {
+        exit(EXIT_FAILURE);
+     }
+
+   memset(&unixname, 0, sizeof(unixname));
+   unixname.sun_family = AF_UNIX;
+   strncpy(unixname.sun_path, SERVER_SOCKET_PATH, 104);
+
+   if (connect(sock, (struct sockaddr *) &unixname, sizeof(unixname)) < 0)
+     {
+        exit(EXIT_FAILURE);
+     }
+
+    _socket_pass(sock, fd);
+}
+
+static void
+transfer_client_process_new(Client **clients, Client *client, void (*new_process)(int))
+{
+   int fds[2];
+
+   socketpair(AF_UNIX, SOCK_DGRAM, 0, fds);
+
+   pid_t pid = fork();
+   if (pid < 0) exit(1);
+   if (pid > 0)
+     {
+        close(fds[1]);
+        _socket_pass(fds[0], client->fd);
+        clients_del(clients, client);
+     }
+   else
+     {
+        close(fds[0]);
+        int fd = _socket_catch(fds[1]);
+        if (fd < 0)
+          {
+             exit(EXIT_FAILURE);
+          }
+        /* Free duplicated memory */
+        char *motd = server_motd_get();
+        if (motd) free(motd);
+        clients_free(clients);
+
+        /* Run the callback */
+        new_process(fd);
+
+        /* Return socket to main process */
+        if (fd > 0)
+          return_socket_main_proc(fd);
+
+        exit(EXIT_SUCCESS);
+     }
+}
+
+static void
+client_prompt_send(Client *c)
+{
+   const char *prompt = "> ";
+
+   write(c->fd, prompt, strlen(prompt));
+}
+
+static void
 usage(void)
 {
    printf("server <port>\n");
@@ -555,15 +699,17 @@ _sig_int_cb(int sig)
 int main(int argc, char **argv)
 {
    Client **clients, *client;
-   int port, flags;
-   struct sockaddr_in servername, clientname;
-   int sock, in, i;
-   socklen_t size;
-   int res, reuseaddr = 1;
    sigset_t newmask, oldmask;
    struct sigaction newaction, oldaction;
    struct timeval tv;
    fd_set read_fd_set;
+
+   struct sockaddr_in servername, clientname;
+   struct sockaddr_un unixname;
+   int sock, sock_unix;
+   socklen_t size;
+
+   int port, flags, in, i, res, reuseaddr = 1;
 
    if (argc != 2)
      {
@@ -571,6 +717,8 @@ int main(int argc, char **argv)
      }
 
    port = atoi(argv[1]);
+
+   server_init();
 
    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
      {
@@ -600,9 +748,19 @@ int main(int argc, char **argv)
         exit(ERR_LISTEN_FAILED);
      }
 
-   /* Initialise before main loop */
+   memset(&unixname, 0, sizeof(unixname));
+   unixname.sun_family = AF_UNIX;
+   strncpy(unixname.sun_path, SERVER_SOCKET_PATH, 104);
 
-   server_init();
+   if ((sock_unix = socket(AF_UNIX, SOCK_DGRAM, 0)) < 0)
+     {
+        exit(ERR_SOCKET_FAILED);
+     }
+
+   if (bind(sock_unix, (struct sockaddr *) &unixname, sizeof(unixname)) < 0)
+     {
+        exit(ERR_BIND_FAILED);
+     }
 
    clients = calloc(1, sizeof(Client *));
 
@@ -610,10 +768,17 @@ int main(int argc, char **argv)
    sigemptyset(&newaction.sa_mask);
    newaction.sa_flags = 0;
    newaction.sa_handler = _sig_int_cb;
-
    sigaction(SIGINT, NULL, &oldaction);
    if (oldaction.sa_handler != SIG_IGN)
      sigaction(SIGINT, &newaction, NULL);
+
+   /* Handle our zombies!!! */
+   sigemptyset(&newaction.sa_mask);
+   newaction.sa_flags = SA_NOCLDWAIT;
+   newaction.sa_handler = SIG_DFL;
+   sigaction(SIGCHLD, NULL, &oldaction);
+   if (oldaction.sa_handler != SIG_IGN)
+     sigaction(SIGCHLD, &newaction, NULL);
 
    sigemptyset(&newmask);
    sigaddset(&newmask, SIGINT);
@@ -624,7 +789,7 @@ int main(int argc, char **argv)
 
    FD_ZERO(&_active_fd_set);
    FD_SET(sock, &_active_fd_set);
-
+   FD_SET(sock_unix, &_active_fd_set);
    printf("PID %d listening on port %d\n", getpid(), port);
 
    while (enabled) {
@@ -647,7 +812,16 @@ int main(int argc, char **argv)
       for (i = 0; i < FD_SETSIZE; i++) {
          if (FD_ISSET(i, &read_fd_set))
            {
-              if (i == sock)
+              if (i == sock_unix)
+                {
+                   int returner = _socket_catch(sock_unix);
+                   if (returner < 0) break;
+
+                   client = clients_add(clients, returner, time(NULL));
+                   server_motd_client_send(client);
+                   client_prompt_send(client);
+                }
+              else if (i == sock)
                 {
                    size = sizeof(clientname);
                    in = accept(sock, (struct sockaddr *) &clientname, &size);
@@ -658,6 +832,7 @@ int main(int argc, char **argv)
 
                    client = clients_add(clients, in, time(NULL));
                    server_motd_client_send(client);
+                   client_prompt_send(client);
                 }
               else 
                 {
@@ -676,8 +851,12 @@ int main(int argc, char **argv)
                         else
                           client_command_failure(client);
 
+                        client_prompt_send(client);
                         switch (client->state)
                           {
+                             case CLIENT_STATE_TRANSFER:
+                               transfer_client_process_new(clients, client, _twilight_zone);
+                               break;
                              case CLIENT_STATE_DISCONNECT:
                                clients_del(clients, client);
                                break;
