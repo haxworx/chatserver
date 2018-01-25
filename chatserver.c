@@ -709,7 +709,7 @@ int main(int argc, char **argv)
    int sock, sock_unix;
    socklen_t size;
 
-   int port, flags, in, i, res, reuseaddr = 1;
+   int port, in, i, res, reuseaddr = 1;
 
    if (argc != 2)
      {
@@ -734,9 +734,6 @@ int main(int argc, char **argv)
      {
         exit(ERR_SETSOCKOPT_FAILED);
      }
-
-   flags = fcntl(sock, F_GETFL, 0);
-   fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
    if (bind(sock, (struct sockaddr *) &servername, sizeof(servername)) < 0)
      {
