@@ -14,6 +14,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <netdb.h>
 #include <netinet/in.h>
 
