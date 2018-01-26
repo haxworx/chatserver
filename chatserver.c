@@ -553,6 +553,19 @@ clients_free(Client **clients)
 }
 
 static void
+_twilight_zone(int fd)
+{
+   const char *msg = "You are in the twilight zone!!!\r\n";
+   char buf[1024];
+   ssize_t len;
+
+   write(fd, msg, strlen(msg));
+   len = read(fd, buf, sizeof(buf) -1);
+   buf[len] = 0x00;
+   printf("client returns from twilight zone!!!\n");
+}
+
+static bool
 _socket_pass(int socket, int fd)
 {
    struct cmsghdr *cmsg;
@@ -577,7 +590,12 @@ _socket_pass(int socket, int fd)
    memmove(CMSG_DATA(cmsg), &fd, sizeof(int));
    msg.msg_controllen = cmsg->cmsg_len;
 
-   sendmsg(socket, &msg, 0);
+   if (sendmsg(socket, &msg, 0) < 0)
+     {
+        return false;
+     }
+
+   return true;
 }
 
 static int
@@ -604,20 +622,7 @@ _socket_catch(int socket)
 }
 
 static void
-_twilight_zone(int fd)
-{
-   const char *msg = "You are in the twilight zone!!!\r\n";
-   char buf[1024];
-   ssize_t len;
-
-   write(fd, msg, strlen(msg));
-   len = read(fd, buf, sizeof(buf) -1);
-   buf[len] = 0x00;
-   printf("client returns from twilight zone!!!\n");
-}
-
-static void
-return_socket_main_proc(int fd)
+_socket_pass_back(int fd)
 {
    struct sockaddr_un unixname;
    int sock;
@@ -640,19 +645,22 @@ return_socket_main_proc(int fd)
 }
 
 static void
-transfer_client_process_new(Client **clients, Client *client, void (*new_process)(int))
+client_transfer_process_new(Client **clients, Client *client, void (*new_process)(int))
 {
    int fds[2];
 
-   socketpair(AF_UNIX, SOCK_DGRAM, 0, fds);
+   if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) < 0)
+     {
+        return;
+     }
 
    pid_t pid = fork();
    if (pid < 0) exit(1);
    if (pid > 0)
      {
         close(fds[1]);
-        _socket_pass(fds[0], client->fd);
-        clients_del(clients, client);
+        if (_socket_pass(fds[0], client->fd))
+          clients_del(clients, client);
      }
    else
      {
@@ -672,7 +680,7 @@ transfer_client_process_new(Client **clients, Client *client, void (*new_process
 
         /* Return socket to main process */
         if (fd > 0)
-          return_socket_main_proc(fd);
+          _socket_pass_back(fd);
 
         exit(EXIT_SUCCESS);
      }
@@ -844,7 +852,7 @@ int main(int argc, char **argv)
                         switch (client->state)
                           {
                              case CLIENT_STATE_TRANSFER:
-                               transfer_client_process_new(clients, client, _twilight_zone);
+                               client_transfer_process_new(clients, client, _twilight_zone);
                                break;
                              case CLIENT_STATE_DISCONNECT:
                                clients_del(clients, client);
