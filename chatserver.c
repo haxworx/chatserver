@@ -59,7 +59,7 @@ struct Client {
 
 static fd_set _active_fd_set;
 
-int server_auth_password_check(const char *username, char *guess)
+int credentials_check(const char *username, char *guess)
 {
    FILE *p;
    struct sigaction newaction, oldaction;
@@ -88,7 +88,8 @@ int server_auth_password_check(const char *username, char *guess)
              cmdstring[i] = '\0';
           }
 
-        status = !WEXITSTATUS(pclose(p));
+        status = pclose(p);
+        status = !WEXITSTATUS(status);
      }
    sigaction(SIGCHLD, &oldaction, NULL);
 
@@ -379,7 +380,7 @@ client_authenticate(Client **clients, Client *client)
         guess = strchr(client->data, ' ') + 1;
         if (guess && guess[0])
           {
-             if (server_auth_password_check(client->username, guess))
+             if (credentials_check(client->username, guess))
                {
                   client->state = CLIENT_STATE_AUTHENTICATED;
                   return true;
