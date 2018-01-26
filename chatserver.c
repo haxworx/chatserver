@@ -13,6 +13,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/mman.h>
 #include <netdb.h>
 #include <netinet/in.h>
 
@@ -37,10 +38,11 @@ typedef enum {
 
 typedef enum {
    CLIENT_STATE_CONNECTED     = (0 << 0),
-   CLIENT_STATE_AUTHENTICATED = (1 << 0),
-   CLIENT_STATE_DISCONNECT    = (1 << 1),
-   CLIENT_STATE_TRANSFER      = (1 << 2),
-   CLIENT_STATE_IGNORE        = (1 << 3),
+   CLIENT_STATE_IDENTIFIED    = (1 << 0),
+   CLIENT_STATE_AUTHENTICATED = (1 << 1),
+   CLIENT_STATE_DISCONNECT    = (1 << 2),
+   CLIENT_STATE_TRANSFER      = (1 << 3),
+   CLIENT_STATE_IGNORE        = (1 << 4),
 } Client_State;
 
 typedef struct Client Client;
@@ -56,6 +58,42 @@ struct Client {
 };
 
 static fd_set _active_fd_set;
+
+int server_auth_password_check(const char *username, char *guess)
+{
+   FILE *p;
+   struct sigaction newaction, oldaction;
+   char cmdstring[1024];
+   int i, status = 0;
+
+   sigemptyset(&newaction.sa_mask);
+   newaction.sa_flags = 0;
+   newaction.sa_handler = SIG_DFL;
+   sigaction(SIGCHLD, NULL, &oldaction);
+   sigaction(SIGCHLD, &newaction, NULL);
+
+   p = popen("./authtool", "w");
+   if (p)
+     {
+        snprintf(cmdstring, sizeof(cmdstring), "%s %s\n", username, guess);
+        fwrite(cmdstring, 1, strlen(cmdstring), p);
+
+        for (i = 0; i < strlen(guess); i++)
+          {
+             guess[i] = '\0';
+          }
+
+        for (i = 0; i < strlen(cmdstring); i++)
+          {
+             cmdstring[i] = '\0';
+          }
+
+        status = !WEXITSTATUS(pclose(p));
+     }
+   sigaction(SIGCHLD, &oldaction, NULL);
+
+   return status;
+}
 
 static char *
 server_motd_get()
@@ -263,7 +301,7 @@ static bool
 _username_valid(const char *username)
 {
    int i;
-   ssize_t len = strlen(username);
+   size_t len = strlen(username);
 
    if (!len || len > 32)
      return false;
@@ -309,19 +347,40 @@ client_command_success(Client *client)
 }
 
 static bool
-client_authenticate(Client **clients, Client *client)
+client_identify(Client **clients, Client *client)
 {
    char *potential;
 
    if (!strncasecmp(client->data, "NICK ", 5))
      {
         potential = strchr(client->data, ' ') + 1;
-        if (potential)
+        if (potential && potential[0])
           {
              if (_username_valid(potential) &&
                  !clients_username_exists(clients, potential))
                {
                   snprintf(client->username, sizeof(client->username), "%s", potential);
+                  client->state = CLIENT_STATE_IDENTIFIED;
+                  return true;
+               }
+          }
+     }
+
+   return false;
+}
+
+static bool
+client_authenticate(Client **clients, Client *client)
+{
+   char *guess;
+
+   if (!strncasecmp(client->data, "PASS ", 5))
+     {
+        guess = strchr(client->data, ' ') + 1;
+        if (guess && guess[0])
+          {
+             if (server_auth_password_check(client->username, guess))
+               {
                   client->state = CLIENT_STATE_AUTHENTICATED;
                   return true;
                }
@@ -419,7 +478,7 @@ static bool
 client_help_send(Client *client)
 {
    char desc[4096];
-   const char *request, *commands = "QUIT, NICK, LIST, MSG, MOTD, HELP.";
+   const char *request, *commands = "QUIT, NICK, PASS, LIST, MSG, MOTD, HELP.";
 
    write(client->fd, "\r\n", 2);
 
@@ -435,7 +494,11 @@ client_help_send(Client *client)
 
    if (!strcasecmp(request, "NICK"))
      {
-        snprintf(desc, sizeof(desc), "NICK: login with desired username.\r\n");
+        snprintf(desc, sizeof(desc), "NICK: use desired username.\r\n");
+     }
+   else if (!strcasecmp(request, "PASS"))
+     {
+        snprintf(desc, sizeof(desc), "PASS: authenticate with password.\r\n");
      }
    else if (!strcasecmp(request, "LIST"))
      {
@@ -520,7 +583,13 @@ client_request(Client **clients, Client *client)
         success = client_message_send(clients, client);
      }
    else if (!strncasecmp(request, "NICK", 4) &&
+            client->state != CLIENT_STATE_IDENTIFIED &&
             client->state != CLIENT_STATE_AUTHENTICATED)
+     {
+        success = client_identify(clients, client);
+     }
+   else if (!strncasecmp(request, "PASS", 4) &&
+            client->state == CLIENT_STATE_IDENTIFIED)
      {
         success = client_authenticate(clients, client);
      }
