@@ -10,10 +10,10 @@ typedef struct {
 } Credentials;
 
 Credentials known_users[] = {
-    { .username = "al", .password = "letmein" },
+    { .username = "al",    .password = "letmein" },
     { .username = "peter", .password = "yeah" },
-    { .username = "sue", .password = "cheese" },
-    { .username = "jim", .password = "slim" },
+    { .username = "sue",   .password = "cheese" },
+    { .username = "jim",   .password = "slim" },
 };
 
 int

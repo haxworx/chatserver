@@ -59,7 +59,8 @@ struct Client {
 
 static fd_set _active_fd_set;
 
-int credentials_check(const char *username, char *guess)
+static int
+credentials_check(const char *username, char *guess)
 {
    FILE *p;
    struct sigaction newaction, oldaction;
@@ -72,25 +73,26 @@ int credentials_check(const char *username, char *guess)
    sigaction(SIGCHLD, NULL, &oldaction);
    sigaction(SIGCHLD, &newaction, NULL);
 
-   p = popen("./authtool", "w");
+   p = popen("./auth", "w");
    if (p)
      {
         snprintf(cmdstring, sizeof(cmdstring), "%s %s\n", username, guess);
         fwrite(cmdstring, 1, strlen(cmdstring), p);
 
-        for (i = 0; i < strlen(guess); i++)
-          {
-             guess[i] = '\0';
-          }
-
-        for (i = 0; i < strlen(cmdstring); i++)
-          {
-             cmdstring[i] = '\0';
-          }
-
         status = pclose(p);
         status = !WEXITSTATUS(status);
      }
+
+   for (i = 0; i < strlen(guess); i++)
+     {
+        guess[i] = '\0';
+     }
+
+   for (i = 0; i < strlen(cmdstring); i++)
+     {
+        cmdstring[i] = '\0';
+     }
+
    sigaction(SIGCHLD, &oldaction, NULL);
 
    return status;
