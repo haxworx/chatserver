@@ -159,7 +159,8 @@ server_motd_client_send(Client *client)
         if (bytes == 0) break;
         if (bytes < 0)
           {
-             if (errno == EAGAIN || errno == EINTR) continue;
+             if (errno == EAGAIN || errno == EINTR)
+               continue;
              else
                return false;
           }
@@ -172,8 +173,32 @@ server_motd_client_send(Client *client)
 }
 
 static void
+_sig_int_cb(int sig)
+{
+   enabled = false;
+}
+
+static void
 server_init(void)
 {
+   struct sigaction newaction, oldaction;
+
+   /* Handle SIGINT gracefully */
+   sigemptyset(&newaction.sa_mask);
+   newaction.sa_flags = 0;
+   newaction.sa_handler = _sig_int_cb;
+   sigaction(SIGINT, NULL, &oldaction);
+   if (oldaction.sa_handler != SIG_IGN)
+     sigaction(SIGINT, &newaction, NULL);
+
+   /* Handle our zombies!!! */
+   sigemptyset(&newaction.sa_mask);
+   newaction.sa_flags = SA_NOCLDWAIT;
+   newaction.sa_handler = SIG_DFL;
+   sigaction(SIGCHLD, NULL, &oldaction);
+   if (oldaction.sa_handler != SIG_IGN)
+     sigaction(SIGCHLD, &newaction, NULL);
+
    unlink(SERVER_SOCKET_PATH);
    server_motd_get();
 }
@@ -592,14 +617,8 @@ client_request(Client **clients, Client *client)
      {
         success = client_message_send(clients, client);
      }
-   else if (!strncasecmp(request, "NICK", 4) &&
-            client->state != CLIENT_STATE_IDENTIFIED &&
-            client->state != CLIENT_STATE_AUTHENTICATED)
-     {
-        success = client_identify(clients, client);
-     }
    else if (!strncasecmp(request, "PASS", 4) &&
-            client->state == CLIENT_STATE_IDENTIFIED)
+            (client->state == CLIENT_STATE_IDENTIFIED))
      {
         success = client_authenticate(clients, client);
      }
@@ -609,6 +628,12 @@ client_request(Client **clients, Client *client)
           client->state = CLIENT_STATE_TRANSFER;
         else
           success = false;
+     }
+   else if (!strncasecmp(request, "NICK", 4) &&
+            (client->state != CLIENT_STATE_IDENTIFIED) &&
+            (client->state != CLIENT_STATE_AUTHENTICATED))
+     {
+        success = client_identify(clients, client);
      }
    else
      {
@@ -662,7 +687,8 @@ _twilight_zone(int fd)
       bytes = read(fd, buf, sizeof(buf) -1);
       if (bytes < 0)
         {
-           if (errno == EAGAIN || errno == EINTR) continue;
+           if (errno == EAGAIN || errno == EINTR)
+             continue;
            else
              exit(ERR_READ_FAILED);
         }
@@ -754,7 +780,8 @@ _socket_pass_back(int fd)
 static void
 client_transfer_process_new(Client **clients, Client *client, void (*new_process)(int))
 {
-   int fds[2];
+   int fd, fds[2];
+   char *freeme;
 
    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) < 0)
      {
@@ -762,8 +789,11 @@ client_transfer_process_new(Client **clients, Client *client, void (*new_process
      }
 
    pid_t pid = fork();
-   if (pid < 0) exit(EXIT_FAILURE);
-   if (pid > 0)
+   if (pid < 0)
+     {
+        exit(EXIT_FAILURE);
+     }
+   else if (pid > 0)
      {
         close(fds[1]);
         if (_socket_pass(fds[0], client->fd))
@@ -772,14 +802,16 @@ client_transfer_process_new(Client **clients, Client *client, void (*new_process
    else
      {
         close(fds[0]);
-        int fd = _socket_catch(fds[1]);
+        fd = _socket_catch(fds[1]);
         if (fd < 0)
           {
              exit(EXIT_FAILURE);
           }
         /* Free duplicated memory */
-        char *motd = server_motd_get();
-        if (motd) free(motd);
+        freeme = server_motd_get();
+        if (freeme)
+          free(freeme);
+
         clients_free(clients);
 
         /* Run the callback */
@@ -800,17 +832,10 @@ usage(void)
    exit(EXIT_SUCCESS);
 }
 
-static void
-_sig_int_cb(int sig)
-{
-   enabled = false;
-}
-
 int main(int argc, char **argv)
 {
    Client **clients, *client;
    sigset_t newmask, oldmask;
-   struct sigaction newaction, oldaction;
    struct timeval tv;
    fd_set read_fd_set;
 
@@ -874,22 +899,6 @@ int main(int argc, char **argv)
 
    clients = calloc(1, sizeof(Client *));
 
-   /* Handle SIGINT gracefully */
-   sigemptyset(&newaction.sa_mask);
-   newaction.sa_flags = 0;
-   newaction.sa_handler = _sig_int_cb;
-   sigaction(SIGINT, NULL, &oldaction);
-   if (oldaction.sa_handler != SIG_IGN)
-     sigaction(SIGINT, &newaction, NULL);
-
-   /* Handle our zombies!!! */
-   sigemptyset(&newaction.sa_mask);
-   newaction.sa_flags = SA_NOCLDWAIT;
-   newaction.sa_handler = SIG_DFL;
-   sigaction(SIGCHLD, NULL, &oldaction);
-   if (oldaction.sa_handler != SIG_IGN)
-     sigaction(SIGCHLD, &newaction, NULL);
-
    sigemptyset(&newmask);
    sigaddset(&newmask, SIGINT);
 
@@ -937,7 +946,8 @@ int main(int argc, char **argv)
                       in = accept(sock, (struct sockaddr *) &clientname, &size);
                       if (in < 0)
                         {
-                           if (errno == EAGAIN || errno == EINTR) break;
+                           if (errno == EAGAIN || errno == EINTR)
+                             break;
                            else
                              exit(ERR_ACCEPT_FAILED);
                         }
@@ -979,7 +989,7 @@ int main(int argc, char **argv)
                 }
            } /* End of FD_ISSET(i, &read_fd_set) */
        }
-   } /* End of while (enabled) */
+   }
 
    clients_free(clients);
    close(sock);
