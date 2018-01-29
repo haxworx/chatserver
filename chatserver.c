@@ -885,7 +885,7 @@ int main(int argc, char **argv)
 
    memset(&unixname, 0, sizeof(unixname));
    unixname.sun_family = AF_UNIX;
-   strncpy(unixname.sun_path, SERVER_SOCKET_PATH, 104);
+   strncpy(unixname.sun_path, SERVER_SOCKET_PATH, sizeof(unixname.sun_path) -1);
 
    if ((sock_unix = socket(AF_UNIX, SOCK_DGRAM, 0)) < 0)
      {
