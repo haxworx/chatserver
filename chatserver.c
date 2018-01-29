@@ -159,7 +159,7 @@ server_motd_client_send(Client *client)
         if (bytes == 0) break;
         if (bytes < 0)
           {
-             if (errno == EAGAIN || errno == EINTR) {}
+             if (errno == EAGAIN || errno == EINTR) continue;
              else
                return false;
           }
@@ -937,8 +937,7 @@ int main(int argc, char **argv)
                       in = accept(sock, (struct sockaddr *) &clientname, &size);
                       if (in < 0)
                         {
-                           if (errno == EAGAIN || errno == EINTR)
-                             break;
+                           if (errno == EAGAIN || errno == EINTR) break;
                            else
                              exit(ERR_ACCEPT_FAILED);
                         }
