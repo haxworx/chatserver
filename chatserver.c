@@ -31,6 +31,7 @@ typedef enum {
    ERR_LISTEN_FAILED     = (1 << 3),
    ERR_SELECT_FAILED     = (1 << 4),
    ERR_ACCEPT_FAILED     = (1 << 5),
+   ERR_READ_FAILED       = (1 << 6),
 } Error_Network;
 
 #define SECOND 1000000
@@ -401,11 +402,21 @@ client_read(Client *client)
    char *tmp, buf[4096];
    ssize_t bytes;
 
-   bytes = read(client->fd, buf, sizeof(buf) - 1);
-   if (bytes <= 0)
-     {
-        return bytes;
-     }
+   do {
+         bytes = read(client->fd, buf, sizeof(buf) - 1);
+         if (bytes == 0)
+           {
+              return bytes;
+           }
+         else if (bytes < 0)
+           {
+              if (errno == EAGAIN || errno == EINTR)
+                return bytes;
+              else
+                exit(ERR_READ_FAILED);
+           }
+         else break;
+   } while (0);
 
    client->unixtime = time(NULL);
 
@@ -631,11 +642,26 @@ _twilight_zone(int fd)
 {
    const char *msg = "You are in the twilight zone!!!\r\n";
    char buf[1024];
-   ssize_t len;
+   ssize_t bytes;
+   fd_set fdset;
+
+   FD_ZERO(&fdset);
+   FD_SET(fd, &fdset);
 
    write(fd, msg, strlen(msg));
-   len = read(fd, buf, sizeof(buf) -1);
-   buf[len] = 0x00;
+   do {
+      select(fd + 1, &fdset, NULL, NULL, NULL);
+      if (!FD_ISSET(fd, &fdset)) continue;
+      bytes = read(fd, buf, sizeof(buf) -1);
+      if (bytes < 0)
+        {
+           if (errno == EAGAIN || errno == EINTR) continue;
+           else
+             exit(ERR_READ_FAILED);
+        }
+      buf[bytes] = 0x00;
+   } while (0);
+
    printf("client returns from twilight zone!!!\n");
 }
 
@@ -729,7 +755,7 @@ client_transfer_process_new(Client **clients, Client *client, void (*new_process
      }
 
    pid_t pid = fork();
-   if (pid < 0) exit(1);
+   if (pid < 0) exit(EXIT_FAILURE);
    if (pid > 0)
      {
         close(fds[1]);
@@ -786,7 +812,7 @@ int main(int argc, char **argv)
    int sock, sock_unix;
    socklen_t size;
 
-   int port, in, i, res, reuseaddr = 1;
+   int flags, port, in, i, res, reuseaddr = 1;
 
    if (argc != 2)
      {
@@ -811,6 +837,9 @@ int main(int argc, char **argv)
      {
         exit(ERR_SETSOCKOPT_FAILED);
      }
+
+   flags = fcntl(sock, F_GETFL, 0);
+   fcntl(sock, F_SETFL, O_NONBLOCK);
 
    if (bind(sock, (struct sockaddr *) &servername, sizeof(servername)) < 0)
      {
@@ -896,15 +925,20 @@ int main(int argc, char **argv)
                 }
               else if (i == sock)
                 {
-                   size = sizeof(clientname);
-                   in = accept(sock, (struct sockaddr *) &clientname, &size);
-                   if (in < 0)
-                     {
-                        exit(ERR_ACCEPT_FAILED);
-                     }
+                   do {
+                      size = sizeof(clientname);
+                      in = accept(sock, (struct sockaddr *) &clientname, &size);
+                      if (in < 0)
+                        {
+                           if (errno == EAGAIN || errno == EINTR)
+                             break;
+                           else
+                             exit(ERR_ACCEPT_FAILED);
+                        }
 
-                   client = clients_add(clients, in, time(NULL));
-                   server_motd_client_send(client);
+                      client = clients_add(clients, in, time(NULL));
+                      server_motd_client_send(client);
+                   } while (1);
                 }
               else 
                 {
@@ -935,7 +969,7 @@ int main(int argc, char **argv)
                                break;
                           }
                      }
-                   break;
+                   else { /* EAGAIN */ }
                 }
            }         
        }
