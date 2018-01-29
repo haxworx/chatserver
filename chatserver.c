@@ -36,8 +36,9 @@ typedef enum {
 
 #define SECOND 1000000
 #define CLIENT_TIMEOUT_CHECK SECOND / 4
+
 #define CLIENT_TIMEOUT_CONNECTION 10
-#define CLIENT_TIMEOUT_AUTHENTICATED 300
+#define CLIENT_TIMEOUT_AUTHENTICATED 5 * 60
 
 typedef enum {
    CLIENT_STATE_CONNECTED     = (0 << 0),
@@ -575,13 +576,6 @@ client_request(Client **clients, Client *client)
      {
         client->state = CLIENT_STATE_DISCONNECT;
      }
-   else if (!strcasecmp(request, "TRANSFER"))
-     {
-        if (client->state == CLIENT_STATE_AUTHENTICATED)
-          client->state = CLIENT_STATE_TRANSFER;
-        else
-          success = false;
-     }
    else if (!strncasecmp(request, "HELP", 4))
      {
         success = client_help_send(client);
@@ -608,6 +602,13 @@ client_request(Client **clients, Client *client)
             client->state == CLIENT_STATE_IDENTIFIED)
      {
         success = client_authenticate(clients, client);
+     }
+   else if (!strcasecmp(request, "TRANSFER"))
+     {
+        if (client->state == CLIENT_STATE_AUTHENTICATED)
+          client->state = CLIENT_STATE_TRANSFER;
+        else
+          success = false;
      }
    else
      {
@@ -645,13 +646,19 @@ _twilight_zone(int fd)
    ssize_t bytes;
    fd_set fdset;
 
+   write(fd, msg, strlen(msg));
+
    FD_ZERO(&fdset);
    FD_SET(fd, &fdset);
 
-   write(fd, msg, strlen(msg));
    do {
-      select(fd + 1, &fdset, NULL, NULL, NULL);
+      if (select(fd + 1, &fdset, NULL, NULL, NULL) < 0)
+        {
+           exit(ERR_SELECT_FAILED);
+        }
+
       if (!FD_ISSET(fd, &fdset)) continue;
+
       bytes = read(fd, buf, sizeof(buf) -1);
       if (bytes < 0)
         {
@@ -839,7 +846,7 @@ int main(int argc, char **argv)
      }
 
    flags = fcntl(sock, F_GETFL, 0);
-   fcntl(sock, F_SETFL, O_NONBLOCK);
+   fcntl(sock, F_SETFL, O_NONBLOCK | flags);
 
    if (bind(sock, (struct sockaddr *) &servername, sizeof(servername)) < 0)
      {
@@ -971,9 +978,9 @@ int main(int argc, char **argv)
                      }
                    else { /* EAGAIN */ }
                 }
-           }         
+           } /* End of FD_ISSET(i, &read_fd_set) */
        }
-   }
+   } /* End of while (enabled) */
 
    clients_free(clients);
    close(sock);
