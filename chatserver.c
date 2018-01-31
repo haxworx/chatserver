@@ -2,7 +2,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ctype.h>
@@ -10,16 +9,9 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/stat.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <netdb.h>
+#include <poll.h>
 #include <netinet/in.h>
 
-#define SERVER_SOCKET_PATH "./socket"
 #define SERVER_MOTD_FILE_PATH "./MOTD"
 
 static bool enabled = true;
@@ -34,9 +26,6 @@ typedef enum {
    ERR_READ_FAILED       = (1 << 6),
 } Error_Network;
 
-#define SECOND 1000000
-#define CLIENT_TIMEOUT_CHECK SECOND / 4
-
 #define CLIENT_TIMEOUT_CONNECTION 10
 #define CLIENT_TIMEOUT_AUTHENTICATED 5 * 60
 
@@ -45,7 +34,6 @@ typedef enum {
    CLIENT_STATE_IDENTIFIED    = (1 << 0),
    CLIENT_STATE_AUTHENTICATED = (1 << 1),
    CLIENT_STATE_DISCONNECT    = (1 << 2),
-   CLIENT_STATE_TRANSFER      = (1 << 3),
    CLIENT_STATE_IGNORE        = (1 << 4),
 } Client_State;
 
@@ -53,15 +41,18 @@ typedef struct Client Client;
 struct Client {
    Client_State state;
    char username[64];
-
    int fd;
+
    uint32_t unixtime;
    char *data;
    ssize_t len;
    Client *next;
 };
 
-static fd_set _active_fd_set;
+#define CLIENTS_MAX 2048
+
+static struct pollfd _sockets[CLIENTS_MAX];
+static int socket_count = 0;
 
 static int
 credentials_check(const char *username, char *guess)
@@ -198,16 +189,9 @@ server_init(void)
    if (oldaction.sa_handler != SIG_IGN)
      sigaction(SIGPIPE, &newaction, NULL);
 
-   /* Handle our zombies!!! */
-   sigemptyset(&newaction.sa_mask);
-   newaction.sa_flags = SA_NOCLDWAIT;
-   newaction.sa_handler = SIG_DFL;
-   sigaction(SIGCHLD, NULL, &oldaction);
-   if (oldaction.sa_handler != SIG_IGN)
-     sigaction(SIGCHLD, &newaction, NULL);
-
-   unlink(SERVER_SOCKET_PATH);
    server_motd_get();
+
+   memset(_sockets, 0, sizeof(_sockets));
 }
 
 static void
@@ -223,7 +207,9 @@ clients_add(Client **clients, int fd, uint32_t unixtime)
 {
    Client *c;
 
-   FD_SET(fd, &_active_fd_set);
+   _sockets[socket_count].fd = fd;
+   _sockets[socket_count].events = POLLIN;
+   socket_count++;
 
    c = clients[0];
    if (c == NULL)
@@ -256,8 +242,14 @@ clients_del(Client **clients, Client *client)
 
    write(client->fd, goodbye, strlen(goodbye));
 
-   FD_CLR(client->fd, &_active_fd_set);
-   close(client->fd);
+   for (int i = 0; i < socket_count; i++)
+     {
+        if (_sockets[i].fd == client->fd)
+          {
+             close(_sockets[i].fd);
+             _sockets[i].fd = -1;
+          }
+     }
 
    prev = NULL;
    c = clients[0];
@@ -281,6 +273,23 @@ clients_del(Client **clients, Client *client)
           }
         prev = c;
         c = c->next;
+     }
+}
+
+static void
+sockets_purge(void)
+{
+   int i, j;
+
+   for (i = 0; i < socket_count; i++)
+     {
+        if (_sockets[i].fd == -1)
+          {
+             for (j = i; j < socket_count; j++)
+               _sockets[j] = _sockets[j + 1];
+
+             socket_count--;
+          }
      }
 }
 
@@ -432,7 +441,7 @@ client_authenticate(Client **clients, Client *client)
 static int
 client_read(Client *client)
 {
-   char *tmp, buf[4096];
+   char buf[4096];
    ssize_t bytes;
 
    do {
@@ -619,13 +628,6 @@ client_request(Client **clients, Client *client)
      {
         success = client_authenticate(clients, client);
      }
-   else if (!strcasecmp(request, "TRANSFER"))
-     {
-        if (client->state == CLIENT_STATE_AUTHENTICATED)
-          client->state = CLIENT_STATE_TRANSFER;
-        else
-          success = false;
-     }
    else if (!strncasecmp(request, "NICK", 4) &&
             (client->state != CLIENT_STATE_IDENTIFIED) &&
             (client->state != CLIENT_STATE_AUTHENTICATED))
@@ -661,168 +663,6 @@ clients_free(Client **clients)
 }
 
 static void
-_twilight_zone(int fd)
-{
-   const char *msg = "You are in the twilight zone!!!\r\n";
-   char buf[1024];
-   ssize_t bytes;
-   fd_set fdset;
-
-   write(fd, msg, strlen(msg));
-
-   FD_ZERO(&fdset);
-   FD_SET(fd, &fdset);
-
-   do {
-      if (select(fd + 1, &fdset, NULL, NULL, NULL) < 0)
-        {
-           exit(ERR_SELECT_FAILED);
-        }
-
-      if (!FD_ISSET(fd, &fdset)) continue;
-
-      bytes = read(fd, buf, sizeof(buf) -1);
-      if (bytes < 0)
-        {
-           if (errno == EAGAIN || errno == EINTR)
-             continue;
-           else
-             exit(ERR_READ_FAILED);
-        }
-      buf[bytes] = 0x00;
-   } while (0);
-
-   printf("client returns from twilight zone!!!\n");
-}
-
-static bool
-_socket_pass(int socket, int fd)
-{
-   struct cmsghdr *cmsg;
-   struct msghdr msg = { 0 };
-   char buf[CMSG_SPACE(sizeof(int))];
-   memset(buf, 0, sizeof(buf));
-
-   struct iovec io;
-   io.iov_base  = "";
-   io.iov_len = 1;
-
-   msg.msg_iov = &io;
-   msg.msg_iovlen = 1;
-   msg.msg_control = buf;
-   msg.msg_controllen = sizeof(buf);
-
-   cmsg = CMSG_FIRSTHDR(&msg);
-   cmsg->cmsg_level = SOL_SOCKET;
-   cmsg->cmsg_type = SCM_RIGHTS;
-   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-
-   memmove(CMSG_DATA(cmsg), &fd, sizeof(int));
-   msg.msg_controllen = cmsg->cmsg_len;
-
-   if (sendmsg(socket, &msg, 0) < 0)
-     {
-        return false;
-     }
-
-   return true;
-}
-
-static int
-_socket_catch(int socket)
-{
-   struct cmsghdr *cmsg;
-   int fd;
-   struct msghdr msg = { 0 };
-   char m_buffer[1], c_buffer[512];
-   struct iovec io = { .iov_base = m_buffer, .iov_len = sizeof(m_buffer) };
-
-   msg.msg_iov = &io;
-   msg.msg_iovlen = 1;
-   msg.msg_control = c_buffer;
-   msg.msg_controllen = sizeof(c_buffer);
-
-   if (recvmsg(socket, &msg, 0) < 0) return -1;
-
-   cmsg = CMSG_FIRSTHDR(&msg);
-
-   memmove(&fd, CMSG_DATA(cmsg), sizeof(int));
-
-   return fd;
-}
-
-static void
-_socket_pass_back(int fd)
-{
-   struct sockaddr_un unixname;
-   int sock;
-
-   if ((sock = socket(AF_UNIX, SOCK_DGRAM, 0)) < 0)
-     {
-        exit(EXIT_FAILURE);
-     }
-
-   memset(&unixname, 0, sizeof(unixname));
-   unixname.sun_family = AF_UNIX;
-   strncpy(unixname.sun_path, SERVER_SOCKET_PATH, 104);
-
-   if (connect(sock, (struct sockaddr *) &unixname, sizeof(unixname)) < 0)
-     {
-        exit(EXIT_FAILURE);
-     }
-
-    _socket_pass(sock, fd);
-}
-
-static void
-client_transfer_process_new(Client **clients, Client *client, void (*new_process)(int))
-{
-   int fd, fds[2];
-   char *freeme;
-
-   if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) < 0)
-     {
-        return;
-     }
-
-   pid_t pid = fork();
-   if (pid < 0)
-     {
-        exit(EXIT_FAILURE);
-     }
-   else if (pid > 0)
-     {
-        close(fds[1]);
-        if (_socket_pass(fds[0], client->fd))
-          clients_del(clients, client);
-     }
-   else
-     {
-        close(fds[0]);
-        fd = _socket_catch(fds[1]);
-        if (fd < 0)
-          {
-             exit(EXIT_FAILURE);
-          }
-        /* Free duplicated memory */
-        freeme = server_motd_get();
-        if (freeme)
-          free(freeme);
-
-        clients_free(clients);
-
-        /* Run the callback */
-        new_process(fd);
-
-        /* Return socket to main process */
-        if (fd > 0)
-          _socket_pass_back(fd);
-
-        exit(EXIT_SUCCESS);
-     }
-}
-
-static void
 usage(void)
 {
    printf("server <port>\n");
@@ -833,12 +673,9 @@ int main(int argc, char **argv)
 {
    Client **clients, *client;
    sigset_t newmask, oldmask;
-   struct timeval tv;
-   fd_set read_fd_set;
 
    struct sockaddr_in servername, clientname;
-   struct sockaddr_un unixname;
-   int sock, sock_unix;
+   int sock;
    socklen_t size;
 
    int flags, port, in, i, res, reuseaddr = 1;
@@ -880,38 +717,20 @@ int main(int argc, char **argv)
         exit(ERR_LISTEN_FAILED);
      }
 
-   memset(&unixname, 0, sizeof(unixname));
-   unixname.sun_family = AF_UNIX;
-   strncpy(unixname.sun_path, SERVER_SOCKET_PATH, sizeof(unixname.sun_path) -1);
-
-   if ((sock_unix = socket(AF_UNIX, SOCK_DGRAM, 0)) < 0)
-     {
-        exit(ERR_SOCKET_FAILED);
-     }
-
-   if (bind(sock_unix, (struct sockaddr *) &unixname, sizeof(unixname)) < 0)
-     {
-        exit(ERR_BIND_FAILED);
-     }
-
    clients = calloc(1, sizeof(Client *));
 
    sigemptyset(&newmask);
    sigaddset(&newmask, SIGINT);
 
-   /* Configure select */
-   tv.tv_sec = 0;
-   tv.tv_usec = CLIENT_TIMEOUT_CHECK;
-
-   FD_ZERO(&_active_fd_set);
-   FD_SET(sock, &_active_fd_set);
-   FD_SET(sock_unix, &_active_fd_set);
+   socket_count = 1;
+   _sockets[0].fd = sock;
+   _sockets[0].events = POLLIN;
+ 
    printf("PID %d listening on port %d\n", getpid(), port);
 
    while (enabled) {
-      read_fd_set = _active_fd_set;
       sigprocmask(SIG_BLOCK, &newmask, &oldmask);
-      if ((res = select(FD_SETSIZE, &read_fd_set, NULL, NULL, &tv)) < 0)
+      if ((res = poll(_sockets, socket_count, 1000 / 4)) < 0)
         {
            exit(ERR_SELECT_FAILED);
         }
@@ -920,72 +739,62 @@ int main(int argc, char **argv)
       if (res == 0)
         {
            clients_timeout_check(clients);
-           tv.tv_sec = 0;
-           tv.tv_usec = CLIENT_TIMEOUT_CHECK;
            continue;
         }
 
-      for (i = 0; i < FD_SETSIZE; i++) {
-         if (FD_ISSET(i, &read_fd_set))
+      bool deleted = false;
+
+      int current_size = socket_count;
+
+      for (i =0; i < current_size; i++) {
+         if (_sockets[i].revents == 0) continue;
+
+         if (_sockets[i].fd == sock)
            {
-              if (i == sock_unix)
+              do {
+                 size = sizeof(clientname);
+                 in = accept(sock, (struct sockaddr *) &clientname, &size);
+                 if (in < 0)
+                   {
+                      if (errno == EAGAIN || errno == EINTR)
+                        break;
+                      else
+                        exit(ERR_ACCEPT_FAILED);
+                   }
+
+                 client = clients_add(clients, in, time(NULL));
+                 server_motd_client_send(client);
+              } while (1);
+           }
+         else
+           {
+              client = client_by_fd(clients, _sockets[i].fd);
+              if (!client) { break; } 
+
+              res = client_read(client);
+              if (res == 0)
                 {
-                   int returner = _socket_catch(sock_unix);
-                   if (returner < 0) break;
-
-                   client = clients_add(clients, returner, time(NULL));
-                   server_motd_client_send(client);
+                   clients_del(clients, client);
+                   deleted = true;
                 }
-              else if (i == sock)
+              else if (res > 0)
                 {
-                   do {
-                      size = sizeof(clientname);
-                      in = accept(sock, (struct sockaddr *) &clientname, &size);
-                      if (in < 0)
-                        {
-                           if (errno == EAGAIN || errno == EINTR)
-                             break;
-                           else
-                             exit(ERR_ACCEPT_FAILED);
-                        }
+                   if (client_request(clients, client))
+                     client_command_success(client);
+                   else
+                     client_command_failure(client);
 
-                      client = clients_add(clients, in, time(NULL));
-                      server_motd_client_send(client);
-                   } while (1);
+                  if (client->state == CLIENT_STATE_DISCONNECT)
+                    {
+                       clients_del(clients, client);
+                       deleted = true;
+                    }
                 }
-              else 
-                {
-                   client = client_by_fd(clients, i);
-                   if (!client) break;
-
-                   res = client_read(client);
-                   if (res == 0)
-                     {
-                        clients_del(clients, client);
-                     }
-                   else if (res > 0)
-                     {
-                        if (client_request(clients, client))
-                          client_command_success(client);
-                        else
-                          client_command_failure(client);
-
-                        switch (client->state)
-                          {
-                             case CLIENT_STATE_TRANSFER:
-                               client_transfer_process_new(clients, client, _twilight_zone);
-                               break;
-                             case CLIENT_STATE_DISCONNECT:
-                               clients_del(clients, client);
-                               break;
-                             default:
-                               break;
-                          }
-                     }
-                   else { /* EAGAIN */ }
-                }
-           } /* End of FD_ISSET(i, &read_fd_set) */
+            }
        }
+
+     if (deleted)
+        sockets_purge();
    }
 
    clients_free(clients);
