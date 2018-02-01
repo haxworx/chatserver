@@ -9,6 +9,8 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 #include <poll.h>
 #include <netinet/in.h>
 
@@ -26,6 +28,7 @@ typedef enum {
    ERR_READ_FAILED       = (1 << 6),
 } Error_Network;
 
+#define CLIENTS_MAX 4096
 #define CLIENT_TIMEOUT_CONNECTION 100
 #define CLIENT_TIMEOUT_AUTHENTICATED 5 * 60
 
@@ -48,8 +51,6 @@ struct Client {
    ssize_t len;
    Client *next;
 };
-
-#define CLIENTS_MAX 2048
 
 static struct pollfd _sockets[CLIENTS_MAX];
 static int socket_count = 0;
@@ -94,7 +95,7 @@ credentials_check(const char *username, char *guess)
 }
 
 static char *
-server_motd_get()
+_motd_get()
 {
    const char *path = SERVER_MOTD_FILE_PATH;
    FILE *f;
@@ -137,7 +138,7 @@ static bool
 server_motd_client_send(Client *client)
 {
    ssize_t total, size, bytes;
-   const char *motd = server_motd_get();
+   const char *motd = _motd_get();
 
    if (!motd) return false;
 
@@ -169,6 +170,37 @@ _sig_int_cb(int sig)
    enabled = false;
 }
 
+static int
+_fd_max_get(void)
+{
+   struct rlimit limit;
+
+   if (getrlimit(RLIMIT_NOFILE, &limit) < 0)
+     return -1;
+
+   return limit.rlim_max;
+}
+
+static void
+_fd_max_set(void)
+{
+   struct rlimit limit;
+   int try, max;
+
+   max =_fd_max_get();
+   if (max < 0) return;
+
+   if (max >= 4096)
+     try = 3128;
+   else if (max >= 3128)
+     try = 2048;
+   else
+     try = 1024;
+
+   limit.rlim_cur = try;
+   setrlimit(RLIMIT_NOFILE, &limit);
+}
+
 static void
 server_init(void)
 {
@@ -189,13 +221,14 @@ server_init(void)
    if (oldaction.sa_handler != SIG_IGN)
      sigaction(SIGPIPE, &newaction, NULL);
 
-   server_motd_get();
+   _fd_max_set();
+   _motd_get();
 }
 
 static void
 server_shutdown(void)
 {
-   char *motd = server_motd_get();
+   char *motd = _motd_get();
    if (motd)
      free(motd);
 }
@@ -759,9 +792,13 @@ int main(int argc, char **argv)
                        if (in < 0)
                          {
                             if (errno == EAGAIN || errno == EINTR)
-                              break;
+                              {
+                                 break;
+                              }
                             else
-                              exit(ERR_ACCEPT_FAILED);
+                              {
+                                 exit(ERR_ACCEPT_FAILED);
+                              }
                          }
 
                        client = clients_add(clients, in, time(NULL));
