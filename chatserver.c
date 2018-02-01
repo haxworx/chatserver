@@ -33,11 +33,12 @@ typedef enum {
 #define CLIENT_TIMEOUT_AUTHENTICATED 5 * 60
 
 typedef enum {
-   CLIENT_STATE_CONNECTED     = (0 << 0),
-   CLIENT_STATE_IDENTIFIED    = (1 << 0),
-   CLIENT_STATE_AUTHENTICATED = (1 << 1),
+   CLIENT_STATE_DISCONNECTED  = (0 << 0),
+   CLIENT_STATE_CONNECTED     = (1 << 1),
    CLIENT_STATE_DISCONNECT    = (1 << 2),
-   CLIENT_STATE_IGNORE        = (1 << 4),
+   CLIENT_STATE_IDENTIFIED    = (1 << 3),
+   CLIENT_STATE_AUTHENTICATED = (1 << 4),
+   CLIENT_STATE_IGNORE        = (1 << 5),
 } Client_State;
 
 typedef struct Client Client;
@@ -148,13 +149,20 @@ server_motd_client_send(Client *client)
    while (size)
      {
         bytes = write(client->fd, &motd[total], size);
-        if (bytes == 0) break;
-        if (bytes < 0)
+        if (bytes == 0)
+          {
+             break;
+          }
+        else if (bytes < 0)
           {
              if (errno == EAGAIN || errno == EINTR)
-               continue;
+               {
+                  continue;
+               }
              else
-               return false;
+               {
+                  return false;
+               }
           }
         size -= bytes;
         total += bytes;
@@ -179,27 +187,7 @@ _fd_max_get(void)
    if (getrlimit(RLIMIT_NOFILE, &limit) < 0)
      return -1;
 
-   return limit.rlim_max;
-}
-
-static void
-_fd_max_set(void)
-{
-   struct rlimit limit;
-   int try, max;
-
-   max =_fd_max_get();
-   if (max < 0) return;
-
-   if (max >= 4096)
-     try = 3128;
-   else if (max >= 3128)
-     try = 2048;
-   else
-     try = 1024;
-
-   limit.rlim_cur = try;
-   setrlimit(RLIMIT_NOFILE, &limit);
+   return limit.rlim_cur - 10;
 }
 
 static void
@@ -227,7 +215,6 @@ static void
 server_init(void)
 {
    _signals_set();
-   _fd_max_set();
    _motd_get();
 }
 
@@ -366,7 +353,7 @@ client_by_fd(Client **clients, int fd)
 static bool
 clients_timeout_check(Client **clients)
 {
-   bool deleted = false;
+   bool clients_deleted = false;
    Client *c = clients[0];
    while (c)
      {
@@ -377,13 +364,13 @@ clients_timeout_check(Client **clients)
           {
              clients_del(clients, c);
              c = clients[0];
-             deleted = true;
+             clients_deleted = true;
              continue;
           }
         c = c->next;
      }
 
-   return deleted;
+   return clients_deleted;
 }
 
 static bool
@@ -397,7 +384,8 @@ _username_valid(const char *username)
 
    for (i = 0; i < len; i++)
      {
-        if (isspace(username[i]))
+        if (isspace(username[i]) ||
+           (!isalpha(username[i]) && !isdigit(username[i])))
           {
              return false;
           }
@@ -489,14 +477,20 @@ client_read(Client *client)
          bytes = read(client->fd, buf, sizeof(buf) - 1);
          if (bytes == 0)
            {
-              return bytes;
+              return CLIENT_STATE_DISCONNECTED;
            }
          else if (bytes < 0)
            {
-              if (errno == EAGAIN || errno == EINTR)
-                return bytes;
-              else
-                exit(ERR_READ_FAILED);
+              switch (errno)
+                {
+                   case EAGAIN:
+                   case EINTR:
+                      return bytes;
+                   case ECONNRESET:
+                      return CLIENT_STATE_DISCONNECTED;
+                   default:
+                      exit(ERR_READ_FAILED);
+                }
            }
          else break;
    } while (0);
@@ -716,10 +710,12 @@ int main(int argc, char **argv)
    sigset_t newmask, oldmask;
 
    struct sockaddr_in servername, clientname;
-   int sock;
+   int sock, sockets_max;
    socklen_t size;
 
    int flags, port, in, i, res, reuseaddr = 1;
+
+   bool clients_deleted = false;
 
    if (argc != 2)
      {
@@ -729,6 +725,8 @@ int main(int argc, char **argv)
    port = atoi(argv[1]);
 
    server_init();
+
+   sockets_max = _fd_max_get();
 
    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
      {
@@ -773,6 +771,11 @@ int main(int argc, char **argv)
 
    while (enabled)
      {
+         if (clients_deleted)
+           {
+              sockets_purge();
+           }
+
          sigprocmask(SIG_BLOCK, &newmask, &oldmask);
          if ((res = poll(_sockets, socket_count, 1000 / 4)) < 0)
            {
@@ -782,12 +785,11 @@ int main(int argc, char **argv)
 
          if (res == 0)
            {
-              if (clients_timeout_check(clients))
-                sockets_purge();
+              clients_deleted = clients_timeout_check(clients);
               continue;
            }
 
-         bool deleted = false;
+         clients_deleted = false;
 
          int current_size = socket_count;
          for (i = 0; i < current_size; i++)
@@ -799,9 +801,15 @@ int main(int argc, char **argv)
                     do {
                        size = sizeof(clientname);
                        in = accept(sock, (struct sockaddr *) &clientname, &size);
+                       if (socket_count >= sockets_max)
+                         {
+                            close(in);
+                            break;
+                         }
                        if (in < 0)
                          {
-                            if (errno == EAGAIN || errno == EINTR)
+                            if (errno == EAGAIN || errno == EMFILE ||
+                                errno == ENFILE || errno == EINTR)
                               {
                                  break;
                               }
@@ -821,10 +829,10 @@ int main(int argc, char **argv)
                     if (!client) { break; }
 
                     res = client_read(client);
-                    if (res == 0)
+                    if (res == CLIENT_STATE_DISCONNECTED)
                       {
                          clients_del(clients, client);
-                         deleted = true;
+                         clients_deleted = true;
                       }
                     else if (res > 0)
                       {
@@ -836,14 +844,11 @@ int main(int argc, char **argv)
                         if (client->state == CLIENT_STATE_DISCONNECT)
                           {
                              clients_del(clients, client);
-                             deleted = true;
+                             clients_deleted = true;
                           }
                       }
                  }
            }
-
-     if (deleted)
-        sockets_purge();
    }
 
    clients_free(clients);
