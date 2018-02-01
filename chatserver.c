@@ -29,7 +29,7 @@ typedef enum {
 } Error_Network;
 
 #define CLIENTS_MAX 4096
-#define CLIENT_TIMEOUT_CONNECTION 100
+#define CLIENT_TIMEOUT_CONNECTION 10
 #define CLIENT_TIMEOUT_AUTHENTICATED 5 * 60
 
 typedef enum {
@@ -159,6 +159,7 @@ server_motd_client_send(Client *client)
         size -= bytes;
         total += bytes;
      }
+
    write(client->fd, "\r\n\r\n", 4);
 
    return true;
@@ -362,9 +363,10 @@ client_by_fd(Client **clients, int fd)
    return NULL;
 }
 
-static void
+static bool
 clients_timeout_check(Client **clients)
 {
+   bool deleted = false;
    Client *c = clients[0];
    while (c)
      {
@@ -375,10 +377,13 @@ clients_timeout_check(Client **clients)
           {
              clients_del(clients, c);
              c = clients[0];
+             deleted = true;
              continue;
           }
         c = c->next;
      }
+
+   return deleted;
 }
 
 static bool
@@ -777,14 +782,14 @@ int main(int argc, char **argv)
 
          if (res == 0)
            {
-              clients_timeout_check(clients);
+              if (clients_timeout_check(clients))
+                sockets_purge();
               continue;
            }
 
          bool deleted = false;
 
          int current_size = socket_count;
-
          for (i = 0; i < current_size; i++)
            {
               if (_sockets[i].revents == 0) continue;
