@@ -1,12 +1,4 @@
-This is a simple select-based chatserver.
-
-There's a cool secret feature using UNIX domain sockets
-where you can pass a client to another process and then
-back in again.
-
-There's a simple authentication process that can be easily
-modified to use anything else. Users are built-in to the
-auth program.
+Includes select and poll based TCP server examples.
 
 To build: run "make"
 
