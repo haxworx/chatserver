@@ -46,6 +46,7 @@ struct Client {
    Client_State state;
    char username[64];
    int fd;
+   struct pollfd *pfd;
 
    uint32_t unixtime;
    char *data;
@@ -53,7 +54,8 @@ struct Client {
    Client *next;
 };
 
-static struct pollfd _sockets[CLIENTS_MAX];
+static struct pollfd **_sockets = NULL;
+
 static int socket_count = 0;
 
 static int
@@ -230,9 +232,11 @@ static Client *
 clients_add(Client **clients, int fd, uint32_t unixtime)
 {
    Client *c;
+   struct pollfd *pfd, *sockets = _sockets[0];
 
-   _sockets[socket_count].fd = fd;
-   _sockets[socket_count].events = POLLIN;
+   pfd = &sockets[socket_count];
+   sockets[socket_count].fd = fd;
+   sockets[socket_count].events = POLLIN;
    socket_count++;
 
    c = clients[0];
@@ -240,6 +244,7 @@ clients_add(Client **clients, int fd, uint32_t unixtime)
      {
         clients[0] = c = calloc(1, sizeof(Client));
         c->fd = fd;
+        c->pfd = pfd;
         c->unixtime = unixtime;
         return c;
      }
@@ -252,6 +257,7 @@ clients_add(Client **clients, int fd, uint32_t unixtime)
         c->next = calloc(1, sizeof(Client));
         c = c->next;
         c->fd = fd;
+        c->pfd = pfd;
         c->unixtime = unixtime;
      }
 
@@ -265,16 +271,19 @@ clients_del(Client **clients, Client *client)
    const char *goodbye = "Bye now!\r\n\r\n";
 
    write(client->fd, goodbye, strlen(goodbye));
-
+ 
+   close(client->fd);
+   client->pfd->fd = -1; 
+/* 
    for (int i = 0; i < socket_count; i++)
      {
-        if (_sockets[i].fd == client->fd)
+        if (_sockets[0][i].fd == client->fd)
           {
-             close(_sockets[i].fd);
-             _sockets[i].fd = -1;
+             close(_sockets[0][i].fd);
+             _sockets[0][i].fd = -1;
           }
      }
-
+ */  
    prev = NULL;
    c = clients[0];
    while (c)
@@ -304,13 +313,14 @@ static void
 sockets_purge(void)
 {
    int i, j;
+   struct pollfd *sockets = _sockets[0];
 
    for (i = 0; i < socket_count; i++)
      {
-        if (_sockets[i].fd == -1)
+        if (sockets[i].fd == -1)
           {
              for (j = i; j < socket_count; j++)
-               _sockets[j] = _sockets[j + 1];
+               sockets[j] = sockets[j + 1];
 
              socket_count--;
           }
@@ -714,8 +724,7 @@ int main(int argc, char **argv)
    socklen_t size;
 
    int flags, port, in, i, res, reuseaddr = 1;
-
-   bool clients_deleted = false;
+   int current_size;
 
    if (argc != 2)
      {
@@ -756,28 +765,30 @@ int main(int argc, char **argv)
         exit(ERR_LISTEN_FAILED);
      }
 
-   memset(_sockets, 0, sizeof(_sockets));
+   _sockets = calloc(1, sizeof(struct pollfd *));
+   _sockets[0] = calloc(1, CLIENTS_MAX * sizeof(struct pollfd));
 
    clients = calloc(1, sizeof(Client *));
 
    sigemptyset(&newmask);
    sigaddset(&newmask, SIGINT);
 
+   struct pollfd *sockets = _sockets[0];
+   sockets[0].fd = sock;
+   sockets[0].events = POLLIN;
    socket_count = 1;
-   _sockets[0].fd = sock;
-   _sockets[0].events = POLLIN;
- 
-   printf("PID %d listening on port %d\n", getpid(), port);
 
+   printf("PID %d listening on port %d\n", getpid(), port);
+   bool deleted = false;
    while (enabled)
      {
-         if (clients_deleted)
-           {
-              sockets_purge();
-           }
+         if (deleted)
+           sockets_purge();
+
+         printf("socks:  %d\n", socket_count);
 
          sigprocmask(SIG_BLOCK, &newmask, &oldmask);
-         if ((res = poll(_sockets, socket_count, 1000 / 4)) < 0)
+         if ((res = poll(sockets, socket_count, 1000 / 4)) < 0)
            {
               exit(ERR_SELECT_FAILED);
            }
@@ -785,54 +796,55 @@ int main(int argc, char **argv)
 
          if (res == 0)
            {
-              clients_deleted = clients_timeout_check(clients);
+              clients_timeout_check(clients);
+              deleted = true;
               continue;
            }
 
-         clients_deleted = false;
+         current_size = socket_count;
 
-         int current_size = socket_count;
          for (i = 0; i < current_size; i++)
            {
-              if (_sockets[i].revents == 0) continue;
+              if (sockets[i].revents == 0) continue;
 
-              if (_sockets[i].fd == sock)
+              if (sockets[i].fd == sock)
                  {
                     do {
-                       size = sizeof(clientname);
-                       in = accept(sock, (struct sockaddr *) &clientname, &size);
-                       if (socket_count >= sockets_max)
-                         {
-                            close(in);
-                            break;
-                         }
-                       if (in < 0)
-                         {
-                            if (errno == EAGAIN || errno == EMFILE ||
-                                errno == ENFILE || errno == EINTR)
-                              {
-                                 break;
-                              }
-                            else
-                              {
-                                 exit(ERR_ACCEPT_FAILED);
-                              }
-                         }
+                          size = sizeof(clientname);
+                          in = accept(sock, (struct sockaddr *) &clientname, &size);
+                          if (in < 0)
+                            {
+                               if (errno == EAGAIN || errno == EMFILE ||
+                                   errno == ENFILE || errno == EINTR)
+                                 {
+                                    break;
+                                 }
+                               else
+                                 {
+                                    exit(ERR_ACCEPT_FAILED);
+                                 }
+                            }
 
-                       client = clients_add(clients, in, time(NULL));
-                       server_motd_client_send(client);
+                          if (socket_count >= sockets_max)
+                            {
+                               close(in);
+                               break;
+                            }
+
+                          client = clients_add(clients, in, time(NULL));
+                          server_motd_client_send(client);
                        } while (1);
                  }
                else
                  {
-                    client = client_by_fd(clients, _sockets[i].fd);
+                    client = client_by_fd(clients, sockets[i].fd);
                     if (!client) { break; }
 
                     res = client_read(client);
                     if (res == CLIENT_STATE_DISCONNECTED)
                       {
                          clients_del(clients, client);
-                         clients_deleted = true;
+                         deleted = true;
                       }
                     else if (res > 0)
                       {
@@ -844,7 +856,7 @@ int main(int argc, char **argv)
                         if (client->state == CLIENT_STATE_DISCONNECT)
                           {
                              clients_del(clients, client);
-                             clients_deleted = true;
+                             deleted = true;
                           }
                       }
                  }
