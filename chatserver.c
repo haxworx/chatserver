@@ -26,7 +26,7 @@ typedef enum {
    ERR_READ_FAILED       = (1 << 6),
 } Error_Network;
 
-#define CLIENT_TIMEOUT_CONNECTION 10
+#define CLIENT_TIMEOUT_CONNECTION 100
 #define CLIENT_TIMEOUT_AUTHENTICATED 5 * 60
 
 typedef enum {
@@ -190,8 +190,6 @@ server_init(void)
      sigaction(SIGPIPE, &newaction, NULL);
 
    server_motd_get();
-
-   memset(_sockets, 0, sizeof(_sockets));
 }
 
 static void
@@ -717,6 +715,8 @@ int main(int argc, char **argv)
         exit(ERR_LISTEN_FAILED);
      }
 
+   memset(_sockets, 0, sizeof(_sockets));
+
    clients = calloc(1, sizeof(Client *));
 
    sigemptyset(&newmask);
@@ -728,70 +728,72 @@ int main(int argc, char **argv)
  
    printf("PID %d listening on port %d\n", getpid(), port);
 
-   while (enabled) {
-      sigprocmask(SIG_BLOCK, &newmask, &oldmask);
-      if ((res = poll(_sockets, socket_count, 1000 / 4)) < 0)
-        {
-           exit(ERR_SELECT_FAILED);
-        }
-      sigprocmask(SIG_UNBLOCK, &oldmask, NULL);
-
-      if (res == 0)
-        {
-           clients_timeout_check(clients);
-           continue;
-        }
-
-      bool deleted = false;
-
-      int current_size = socket_count;
-
-      for (i =0; i < current_size; i++) {
-         if (_sockets[i].revents == 0) continue;
-
-         if (_sockets[i].fd == sock)
+   while (enabled)
+     {
+         sigprocmask(SIG_BLOCK, &newmask, &oldmask);
+         if ((res = poll(_sockets, socket_count, 1000 / 4)) < 0)
            {
-              do {
-                 size = sizeof(clientname);
-                 in = accept(sock, (struct sockaddr *) &clientname, &size);
-                 if (in < 0)
-                   {
-                      if (errno == EAGAIN || errno == EINTR)
-                        break;
-                      else
-                        exit(ERR_ACCEPT_FAILED);
-                   }
-
-                 client = clients_add(clients, in, time(NULL));
-                 server_motd_client_send(client);
-              } while (1);
+              exit(ERR_SELECT_FAILED);
            }
-         else
+         sigprocmask(SIG_UNBLOCK, &oldmask, NULL);
+
+         if (res == 0)
            {
-              client = client_by_fd(clients, _sockets[i].fd);
-              if (!client) { break; } 
+              clients_timeout_check(clients);
+              continue;
+           }
 
-              res = client_read(client);
-              if (res == 0)
-                {
-                   clients_del(clients, client);
-                   deleted = true;
-                }
-              else if (res > 0)
-                {
-                   if (client_request(clients, client))
-                     client_command_success(client);
-                   else
-                     client_command_failure(client);
+         bool deleted = false;
 
-                  if (client->state == CLIENT_STATE_DISCONNECT)
-                    {
-                       clients_del(clients, client);
-                       deleted = true;
-                    }
-                }
-            }
-       }
+         int current_size = socket_count;
+
+         for (i = 0; i < current_size; i++)
+           {
+              if (_sockets[i].revents == 0) continue;
+
+              if (_sockets[i].fd == sock)
+                 {
+                    do {
+                       size = sizeof(clientname);
+                       in = accept(sock, (struct sockaddr *) &clientname, &size);
+                       if (in < 0)
+                         {
+                            if (errno == EAGAIN || errno == EINTR)
+                              break;
+                            else
+                              exit(ERR_ACCEPT_FAILED);
+                         }
+
+                       client = clients_add(clients, in, time(NULL));
+                       server_motd_client_send(client);
+                       } while (1);
+                 }
+               else
+                 {
+                    client = client_by_fd(clients, _sockets[i].fd);
+                    if (!client) { break; }
+
+                    res = client_read(client);
+                    if (res == 0)
+                      {
+                         clients_del(clients, client);
+                         deleted = true;
+                      }
+                    else if (res > 0)
+                      {
+                         if (client_request(clients, client))
+                           client_command_success(client);
+                         else
+                           client_command_failure(client);
+
+                        if (client->state == CLIENT_STATE_DISCONNECT)
+                          {
+                             clients_del(clients, client);
+                             deleted = true;
+                          }
+                      }
+                 }
+           }
 
      if (deleted)
         sockets_purge();
