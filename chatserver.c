@@ -202,7 +202,7 @@ _fd_max_set(void)
 }
 
 static void
-server_init(void)
+_signals_set(void)
 {
    struct sigaction newaction, oldaction;
 
@@ -220,7 +220,12 @@ server_init(void)
    sigaction(SIGPIPE, NULL, &oldaction);
    if (oldaction.sa_handler != SIG_IGN)
      sigaction(SIGPIPE, &newaction, NULL);
+}
 
+static void
+server_init(void)
+{
+   _signals_set();
    _fd_max_set();
    _motd_get();
 }
