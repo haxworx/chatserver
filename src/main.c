@@ -42,6 +42,7 @@ int main(int argc, char **argv)
         if (server.clients_deleted)
           {
              server.sockets_purge();
+             server.clients_deleted = false;
           }
          
         printf("socks:  %d\n", server.socket_count);

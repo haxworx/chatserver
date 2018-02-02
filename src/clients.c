@@ -51,7 +51,9 @@ clients_del(Client **clients, Client *client)
    
    close(client->pfd->fd);
 
-   client->pfd->fd = -1; 
+   client->pfd->fd = -1;
+
+   printf("sock is %d\n", client->pfd->fd);
  
    server.clients_deleted = true;
  

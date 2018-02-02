@@ -86,16 +86,14 @@ server_sockets_purge(void)
 {
    int i, j;
    struct pollfd **sockets = &server.sockets[0];
-puts("GOING FOR IT!");
    int count = server.socket_count;
+
    for (i = 0; i < count; i++)
      {
-printf("%d\n", sockets[i]->fd);
-        if (sockets[i]->fd == -1)
+        if (sockets[i]->fd == -1 || sockets[i]->fd == 0)
           {
-             for (j = i; j < server.socket_count; j++)
+             for (j = i; j < count; j++)
                sockets[j] = sockets[j + 1];
-             printf("DELETED!");
              server.socket_count--;
           }
      }
