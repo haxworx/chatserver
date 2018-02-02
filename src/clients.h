@@ -25,26 +25,18 @@ struct Client {
    Client *next;
 };
 
-Client *clients_add(Client **clients, int fd, uint32_t unixtime);
+Client *clients_add(Client **clients, int fd);
 void clients_del(Client **clients, Client *client);
 Client *client_by_username(Client **clients, const char *username);
 Client *client_by_fd(Client **clients, int fd);
 bool clients_timeout_check(Client **clients);
-
 void client_command_failure(Client *client);
-
 void client_command_success(Client *client);
-
 bool client_identify(Client **clients, Client *client);
-
 bool client_authenticate(Client **clients, Client *client);
-
 int client_read(Client *client);
-
 void clients_active_list(Client **clients, Client *client);
-
 bool client_message_send(Client **clients, Client *client);
-
 bool client_help_send(Client *client);
 bool client_request(Client **clients, Client *client);
 void clients_free(Client **clients);

@@ -17,7 +17,7 @@ int main(int argc, char **argv)
    Client **clients, *client;
    sigset_t newmask, oldmask;
    struct pollfd *sockets;
-   int i, res, current_size;
+   int i, res;
 
    if (argc != 2)
      {
@@ -26,29 +26,28 @@ int main(int argc, char **argv)
 
    server_init(atoi(argv[1]));
    
-   clients = server.clients;
-   sockets = server.sockets[0];
+   sockets = server.sockets;
    sockets[0].fd = server.sock;
    sockets[0].events = POLLIN;
    server.socket_count = 1;
+   clients = server.clients;
 
    sigemptyset(&newmask);
    sigaddset(&newmask, SIGINT);
 
-   printf("PID %d listening on port %d\n", getpid(), server.port);
+   printf("PID %d listening on port %d, maximum clients %d\n", getpid(), server.port, server.sockets_max);
 
    while (enabled)
      {
-        if (server.clients_deleted)
+        if (server.clients_deleted || server.clients_added)
           {
-             server.sockets_purge();
-             server.clients_deleted = false;
+             server.sockets_check();
+             server.clients_deleted = server.clients_added = false;
+             printf("total socks: %d clients: %d\n", server.socket_count, server.socket_count - 1);
           }
-         
-        printf("socks:  %d\n", server.socket_count);
 
         sigprocmask(SIG_BLOCK, &newmask, &oldmask);
-        if ((res = poll(sockets, server.socket_count, 1000 / 4)) < 0)
+        if ((res = poll(sockets, server.sockets_max, 1000 / 4)) < 0)
           {
              exit(ERR_SELECT_FAILED);
           }
@@ -60,10 +59,7 @@ int main(int argc, char **argv)
              continue;
           }
 
-        current_size = server.socket_count;
-        server.clients_deleted = false;
-
-        for (i = 0; i < current_size; i++)
+        for (i = 0; i < server.sockets_max; i++)
           {
              if (sockets[i].revents == 0) continue;
 
@@ -92,7 +88,7 @@ int main(int argc, char **argv)
                              break;
                          }
 
-                       client = clients_add(clients, in, time(NULL));
+                       client = server.clients_add(clients, in);
                        server.motd_send(client);
                     } while (1);
                  }
@@ -104,18 +100,18 @@ int main(int argc, char **argv)
                   res = server.client_read(client);
                   if (res == CLIENT_STATE_DISCONNECTED)
                     {
-                       clients_del(clients, client);
+                       server.clients_del(clients, client);
                     }
                   else if (res > 0)
                     {
-                       if (client_request(clients, client))
-                         client_command_success(client);
+                       if (server.request_parse(clients, client))
+                         server.success_send(client);
                        else
-                         client_command_failure(client);
+                         server.failure_send(client);
 
                        if (client->state == CLIENT_STATE_DISCONNECT)
                          {
-                            clients_del(clients, client);
+                            server.clients_del(clients, client);
                          }
                     }
                }

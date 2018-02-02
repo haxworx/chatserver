@@ -7,13 +7,45 @@ extern bool enabled;
 static int
 _fd_max_get(void)
 {
-   struct rlimit limit;
+   struct rlimit limits;
 
-   if (getrlimit(RLIMIT_NOFILE, &limit) < 0)
+   if (getrlimit(RLIMIT_NOFILE, &limits) < 0)
      return -1;
 
-   return limit.rlim_cur - 10;
+   return limits.rlim_max;
 }
+
+static int
+_fd_max_set(void)
+{
+   int max, current = _fd_max_get();
+
+   if (current < 0)
+     return 128;
+   else if (current >= 4096)
+     max = 4096;
+   else if (current >= 3128)
+     max = 3128;
+   else if (current >= 2048)
+     max = 2048;
+   else if (current >= 1024)
+     max = 1024;
+   else if (current >= 512)
+     max = 512;
+   else if (current >= 256)
+     max = 256;
+   else
+     max = 128;
+
+   struct rlimit limits = { max, max };
+
+   setrlimit(RLIMIT_NOFILE, &limits);
+
+   getrlimit(RLIMIT_NOFILE, &limits);
+
+   return limits.rlim_cur - 10;
+}
+
 static void
 _sig_int_cb(int sig)
 {
@@ -82,19 +114,18 @@ server_motd_get()
 }
 
 void
-server_sockets_purge(void)
+server_sockets_check(void)
 {
-   int i, j;
-   struct pollfd **sockets = &server.sockets[0];
-   int count = server.socket_count;
+   int i;
+   struct pollfd *sockets = server.sockets;
 
-   for (i = 0; i < count; i++)
+   server.socket_count = 0;
+
+   for (i = 0; i < server.sockets_max; i++)
      {
-        if (sockets[i]->fd == -1 || sockets[i]->fd == 0)
+        if (sockets[i].fd != -1)
           {
-             for (j = i; j < count; j++)
-               sockets[j] = sockets[j + 1];
-             server.socket_count--;
+             server.socket_count++;
           }
      }
 }
@@ -108,31 +139,24 @@ server_shutdown(void)
    
    clients_free(server.clients);
    close(server.sock);
-
-   free(server.space);
    free(server.sockets);
 }
 
 void
 server_init(uint16_t port)
 {
-   struct pollfd **tmp;
    struct sockaddr_in servername;
    int i, flags, reuseaddr = 1;
 
    memset(&server, 0, sizeof(Server));
-   server.sockets = calloc(1, CLIENTS_MAX * sizeof(struct pollfd *));
-   server.space = calloc(1, CLIENTS_MAX * sizeof(struct pollfd));
+   server.sockets = calloc(1, CLIENTS_MAX * sizeof(struct pollfd));
 
-   tmp = &server.sockets[0];
    for (i = 0; i < CLIENTS_MAX; i++)
      {
-        tmp[i] = &server.space[i];
+        server.sockets[i].fd = -1;
      }
 
-   server.clients = calloc(1, sizeof(Client *));
-
-   server.sockets_max = _fd_max_get();
+   server.sockets_max = _fd_max_set();
 
    if ((server.sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
      {
@@ -163,11 +187,21 @@ server_init(uint16_t port)
      {
         exit(ERR_LISTEN_FAILED);
      }
-   
+
    _signals_set();
    server_motd_get();
 
-   server.sockets_purge = &server_sockets_purge;
+   server.clients = calloc(1, sizeof(struct pollfd) * CLIENTS_MAX);
+
+   server.clients_add = &clients_add;
+   server.clients_del = &clients_del;
+
+   server.success_send = &client_command_success;
+   server.failure_send = &client_command_failure;
+
+   server.request_parse = &client_request;
+
+   server.sockets_check = &server_sockets_check;
    server.timeout_check = &clients_timeout_check;
    server.client_read = &client_read;
    server.motd_send = &client_motd_client_send;

@@ -6,15 +6,27 @@
 extern Server server;
 
 Client *
-clients_add(Client **clients, int fd, uint32_t unixtime)
+clients_add(Client **clients, int fd)
 {
    Client *c;
-   struct pollfd *pfd, *sockets = server.sockets[0];
+   struct pollfd *pfd, *sockets = server.sockets;
+   uint32_t unixtime = time(NULL);
+   int socket_index = 0;
 
-   pfd = &sockets[server.socket_count];
-   sockets[server.socket_count].fd = fd;
-   sockets[server.socket_count].events = POLLIN;
-   server.socket_count++;
+   for (int i = 1; i < server.sockets_max; i++)
+     {
+        if (sockets[i].fd == -1)
+          {
+             socket_index = i;
+             break;
+          }
+     }
+
+   server.clients_added = true;
+
+   pfd = &sockets[socket_index];
+   sockets[socket_index].fd = fd;
+   sockets[socket_index].events = POLLIN;
 
    c = clients[0];
    if (c == NULL)
@@ -49,12 +61,9 @@ clients_del(Client **clients, Client *client)
 
    write(client->fd, goodbye, strlen(goodbye));
    
-   close(client->pfd->fd);
+   close(client->fd);
 
    client->pfd->fd = -1;
-
-   printf("sock is %d\n", client->pfd->fd);
- 
    server.clients_deleted = true;
  
    prev = NULL;

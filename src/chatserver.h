@@ -41,10 +41,9 @@ typedef struct {
    uint16_t port;
    int socket_count;
    int sockets_max;
-   bool clients_deleted;
+   bool clients_deleted, clients_added;
 
-   struct pollfd **sockets;
-   struct pollfd *space;
+   struct pollfd *sockets;
    Client **clients;
 
    void (*shutdown)(void);
@@ -52,7 +51,15 @@ typedef struct {
    int (*client_read)(Client *client);
    bool (*motd_send)(Client *client);
    bool (*help_send)(Client *client);
-   void (*sockets_purge)(void);
+   void (*sockets_check)(void);
+
+   bool (*request_parse)(Client **clients, Client *client);
+
+   Client * (*clients_add)(Client **clients, int fd);
+   void (*clients_del)(Client **clients, Client *client);
+
+   void (*success_send)(Client *client);
+   void (*failure_send)(Client *client);
 
 } Server;
 
