@@ -18,10 +18,6 @@
 #include <netinet/in.h>
 #include "clients.h"
 
-#define SERVER_MOTD_FILE_PATH "./MOTD"
-
-extern bool enabled;
-
 typedef enum {
    ERR_SOCKET_FAILED     = (1 << 0),
    ERR_SETSOCKOPT_FAILED = (1 << 1),
@@ -39,14 +35,21 @@ typedef enum {
 typedef struct {
    int sock;
    uint16_t port;
+
    int socket_count;
    int sockets_max;
+
+   bool enabled;
    bool clients_deleted, clients_added;
+
+   const char *motd_path;
 
    struct pollfd *sockets;
    Client **clients;
 
    void (*shutdown)(void);
+   void (*run)(void);
+   void (*accept_or_deny)(void);
    bool (*timeout_check)(Client **clients);
    int (*client_read)(Client *client);
    bool (*motd_send)(Client *client);

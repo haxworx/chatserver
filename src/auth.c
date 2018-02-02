@@ -6,7 +6,8 @@
 
 /* Obv just an example auth implementation */
 
-int credentials_check(const char *username, char *guess)
+int
+credentials_check(const char *username, char *guess)
 {
    FILE *p;
    struct sigaction newaction, oldaction;

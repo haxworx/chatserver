@@ -1,8 +1,8 @@
 #include "chatserver.h"
 #include "clients.h"
+#include "server.h"
 
 extern Server server;
-extern bool enabled;
 
 static int
 _fd_max_get(void)
@@ -15,14 +15,18 @@ _fd_max_get(void)
    return limits.rlim_max;
 }
 
-static int
-_fd_max_set(void)
+static void
+server_fd_max_set(void)
 {
    int max, current = _fd_max_get();
 
    if (current < 0)
-     return 128;
-   else if (current >= 4096)
+     {
+        server.sockets_max = 128;
+        return;
+     }
+
+   if (current >= 4096)
      max = 4096;
    else if (current >= 3128)
      max = 3128;
@@ -43,17 +47,17 @@ _fd_max_set(void)
 
    getrlimit(RLIMIT_NOFILE, &limits);
 
-   return limits.rlim_cur - 10;
+   server.sockets_max = limits.rlim_cur - 10;
 }
 
 static void
 _sig_int_cb(int sig)
 {
-   enabled = false;
+   server.enabled = false;
 }
 
 static void
-_signals_set(void)
+server_signal_actions_set(void)
 {
    struct sigaction newaction, oldaction;
 
@@ -73,18 +77,33 @@ _signals_set(void)
      sigaction(SIGPIPE, &newaction, NULL);
 }
 
+void
+server_motd_path_set(const char *path)
+{
+   server.motd_path = path;
+}
+
+const char *
+server_motd_path_get(void)
+{
+   return server.motd_path;
+}
+
 char *
 server_motd_get()
 {
-   const char *path = SERVER_MOTD_FILE_PATH;
    FILE *f;
    struct stat st;
    int size;
    char buffer[4096];
    ssize_t bytes, total = 0;
    static char *motd = NULL;
+   const char *path = server_motd_path_get();
+
+   if (!path) return NULL;
 
    if (motd) return motd;
+
 
    if (stat(path, &st) < 0)
      return NULL;
@@ -143,6 +162,117 @@ server_shutdown(void)
 }
 
 void
+server_main_loop(void)
+{
+   Client **clients, *client;
+   sigset_t newmask, oldmask;
+   struct pollfd *sockets;
+   int i, res;
+
+   sockets = server.sockets;
+   clients = server.clients;
+
+   sigemptyset(&newmask);
+   sigaddset(&newmask, SIGINT);
+
+   while (server.enabled)
+      {
+         if (server.clients_deleted || server.clients_added)
+           {
+              server.sockets_check();
+              server.clients_deleted = server.clients_added = false;
+              printf("\rtotal socks: %5d clients: %5d ", server.socket_count, server.socket_count - 1);
+              fflush(stdout);
+           }
+
+         sigprocmask(SIG_BLOCK, &newmask, &oldmask);
+         if ((res = poll(sockets, server.sockets_max, 1000 / 4)) < 0)
+           {
+              exit(ERR_SELECT_FAILED);
+           }
+         sigprocmask(SIG_UNBLOCK, &oldmask, NULL);
+
+         if (res == 0)
+            {
+               server.timeout_check(clients);
+               continue;
+            }
+
+         for (i = 0; i < server.sockets_max; i++)
+           {
+              if (sockets[i].revents == 0) continue;
+
+              if (sockets[i].fd == server.sock)
+                {
+                   server_accept();
+                }
+              else
+                {
+                   client = client_by_fd(clients, sockets[i].fd);
+                   if (!client) { break; }
+
+                   res = server.client_read(client);
+                   if (res < 0) {}
+                   else if (res == CLIENT_STATE_DISCONNECTED)
+                     {
+                        server.clients_del(clients, client);
+                     }
+                   else
+                     {
+                        if (server.request_parse(clients, client))
+                          server.success_send(client);
+                        else
+                          server.failure_send(client);
+
+                        if (client->state == CLIENT_STATE_DISCONNECT)
+                          {
+                             server.clients_del(clients, client);
+                          }
+                     }
+                }
+           }
+      }
+}
+
+void
+server_accept(void)
+{
+   Client *client;
+   struct sockaddr_in clientname;
+   int sock;
+   socklen_t size;
+
+   do {
+         size = sizeof(clientname);
+         sock = accept(server.sock, (struct sockaddr *) &clientname, &size);
+         if (sock < 0)
+           {
+              if (errno == EAGAIN || errno == EMFILE ||
+                  errno == ENFILE || errno == EINTR)
+                {
+                   break;
+                }
+              else
+                {
+                   exit(ERR_ACCEPT_FAILED);
+                }
+           }
+
+         if (server.socket_count >= server.sockets_max)
+           {
+              close(sock);
+              break;
+           }
+
+         client = server.clients_add(server.clients, sock);
+         if (client)
+           {
+              server.motd_send(client);
+           }
+   } while (1);
+}
+
+void
 server_init(uint16_t port)
 {
    struct sockaddr_in servername;
@@ -155,8 +285,6 @@ server_init(uint16_t port)
      {
         server.sockets[i].fd = -1;
      }
-
-   server.sockets_max = _fd_max_set();
 
    if ((server.sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
      {
@@ -188,11 +316,19 @@ server_init(uint16_t port)
         exit(ERR_LISTEN_FAILED);
      }
 
-   _signals_set();
-   server_motd_get();
+   server.sockets[0].fd = server.sock;
+   server.sockets[0].events = POLLIN;
+   server.socket_count = 1;
+
+   server_fd_max_set();
+   server_signal_actions_set();
+   server_motd_path_set("./MOTD");
 
    server.clients = calloc(1, sizeof(struct pollfd) * CLIENTS_MAX);
 
+   server.enabled = true;
+
+   /* Function pointers */
    server.clients_add = &clients_add;
    server.clients_del = &clients_del;
 
@@ -201,6 +337,8 @@ server_init(uint16_t port)
 
    server.request_parse = &client_request;
 
+   server.run = &server_main_loop;
+   server.accept_or_deny = &server_accept;
    server.sockets_check = &server_sockets_check;
    server.timeout_check = &clients_timeout_check;
    server.client_read = &client_read;

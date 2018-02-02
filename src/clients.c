@@ -22,6 +22,12 @@ clients_add(Client **clients, int fd)
           }
      }
 
+   if (socket_index == 0)
+     {
+        close(fd);
+        return NULL;
+     }
+
    server.clients_added = true;
 
    pfd = &sockets[socket_index];
