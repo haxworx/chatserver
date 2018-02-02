@@ -28,7 +28,6 @@ typedef enum {
    ERR_READ_FAILED       = (1 << 6),
 } Error_Network;
 
-#define CLIENTS_MAX 4096
 #define CLIENT_TIMEOUT_CONNECTION 10
 #define CLIENT_TIMEOUT_AUTHENTICATED 5 * 60
 
@@ -45,6 +44,7 @@ typedef struct {
    const char *motd_path;
 
    struct pollfd *sockets;
+   int poll_array_size;
    Client **clients;
 
    void (*shutdown)(void);

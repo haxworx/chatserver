@@ -3,17 +3,20 @@
 #include "server.h"
 #include "auth.h"
 
-extern Server server;
-
 Client *
 clients_add(Client **clients, int fd)
 {
+   Server *server;
    Client *c;
-   struct pollfd *pfd, *sockets = server.sockets;
+   struct pollfd *pfd, *sockets;
    uint32_t unixtime = time(NULL);
    int socket_index = 0;
 
-   for (int i = 1; i < server.sockets_max; i++)
+   server = server_self();
+
+   sockets = server->sockets;
+
+   for (int i = 1; i < server->sockets_max; i++)
      {
         if (sockets[i].fd == -1)
           {
@@ -28,7 +31,7 @@ clients_add(Client **clients, int fd)
         return NULL;
      }
 
-   server.clients_added = true;
+   server->clients_added = true;
 
    pfd = &sockets[socket_index];
    sockets[socket_index].fd = fd;
@@ -62,6 +65,7 @@ clients_add(Client **clients, int fd)
 void
 clients_del(Client **clients, Client *client)
 {
+   Server *server = server_self();
    Client *c, *prev;
    const char *goodbye = "Bye now!\r\n\r\n";
 
@@ -70,7 +74,7 @@ clients_del(Client **clients, Client *client)
    close(client->fd);
 
    client->pfd->fd = -1;
-   server.clients_deleted = true;
+   server->clients_deleted = true;
  
    prev = NULL;
    c = clients[0];
@@ -451,6 +455,7 @@ client_request(Client **clients, Client *client)
 {
    const char *request;
    bool success = true;
+   Server *server = server_self();
 
    _client_data_trim(client);
 
@@ -462,11 +467,11 @@ client_request(Client **clients, Client *client)
      }
    else if (!strncasecmp(request, "HELP", 4))
      {
-        success = server.help_send(client);
+        success = server->help_send(client);
      }
    else if (!strcasecmp(request, "MOTD"))
      {
-        success = server.motd_send(client);
+        success = server->motd_send(client);
      }
    else if (!strcasecmp(request, "LIST"))
      {

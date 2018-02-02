@@ -4,6 +4,7 @@
 #include "chatserver.h"
 #include "clients.h"
 
+Server *server_self(void);
 char *server_motd_get(void);
 void server_sockets_purge(void);
 void server_shutdown(void);
