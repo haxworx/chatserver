@@ -19,16 +19,18 @@ int main(int argc, char **argv)
         usage();
      }
 
-   server_init(atoi(argv[1]));
+   server = server_new();
+   if (!server)
+     exit(EXIT_FAILURE);
 
-   server = server_self();
+   server_port_set(atoi(argv[1]));
 
    printf("PID %d listening on port %d, maximum clients %d\n",
           getpid(), server->port, server->sockets_max);
 
-   server->run();
+   server_run();
 
-   server->shutdown();
+   server_shutdown();
 
    return EXIT_SUCCESS;
 }

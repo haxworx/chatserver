@@ -4,12 +4,13 @@
 #include "chatserver.h"
 #include "clients.h"
 
+Server *server_new(void);
 Server *server_self(void);
-char *server_motd_get(void);
+void server_port_set(uint16_t port);
 void server_sockets_purge(void);
 void server_shutdown(void);
-void server_init(uint16_t port);
 void server_accept(void);
-void server_main_loop(void);
+void server_run(void);
+char *server_motd_get(void);
 
 #endif

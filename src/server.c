@@ -21,6 +21,14 @@ _fd_max_get(void)
    return limits.rlim_max;
 }
 
+void
+server_port_set(uint16_t port)
+{
+   Server *server = server_self();
+
+   server->port = port;
+}
+
 static void
 server_fd_max_set(void)
 {
@@ -179,7 +187,47 @@ server_shutdown(void)
 }
 
 void
-server_main_loop(void)
+_server_listen(void)
+{
+   struct sockaddr_in servername;
+   int flags, reuseaddr = 1;
+   Server *server = server_self();
+
+   if ((server->sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+     {
+        exit(ERR_SOCKET_FAILED);
+     }
+
+   memset(&servername, 0, sizeof(servername));
+   servername.sin_family = AF_INET;
+   servername.sin_port = htons(server->port);
+   servername.sin_addr.s_addr = INADDR_ANY;
+
+   if (setsockopt(server->sock, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr)) < 0)
+     {
+        exit(ERR_SETSOCKOPT_FAILED);
+     }
+
+   flags = fcntl(server->sock, F_GETFL, 0);
+   fcntl(server->sock, F_SETFL, O_NONBLOCK | flags);
+
+   if (bind(server->sock, (struct sockaddr *) &servername, sizeof(servername)) < 0)
+     {
+         exit(ERR_BIND_FAILED);
+     }
+
+   if (listen(server->sock, 5) < 0)
+     {
+        exit(ERR_LISTEN_FAILED);
+     }
+
+   server->sockets[0].fd = server->sock;
+   server->sockets[0].events = POLLIN;
+   server->socket_count = 1;
+}
+
+void
+server_run(void)
 {
    Server *server;
    Client **clients, *client;
@@ -189,6 +237,8 @@ server_main_loop(void)
 
    server = server_self();
 
+   _server_listen();
+
    sockets = server->sockets;
    clients = server->clients;
 
@@ -197,13 +247,8 @@ server_main_loop(void)
 
    while (server->enabled)
       {
-         if (server->clients_deleted || server->clients_added)
-           {
-              server->sockets_check();
-              server->clients_deleted = server->clients_added = false;
-              printf("\rtotal socks: %5d clients: %5d ", server->socket_count, server->socket_count - 1);
-              fflush(stdout);
-           }
+         printf("\rtotal socks: %5d clients: %5d ", server->socket_count, server->socket_count - 1);
+         fflush(stdout);
 
          sigprocmask(SIG_BLOCK, &newmask, &oldmask);
          if ((res = poll(sockets, server->sockets_max, 1000 / 4)) < 0)
@@ -295,14 +340,16 @@ server_accept(void)
    } while (1);
 }
 
-void
-server_init(uint16_t port)
+
+Server *
+server_new(void)
 {
-   struct sockaddr_in servername;
-   int i, flags, reuseaddr = 1;
    Server *server;
+   int i;
 
    _server_global_object = calloc(1, sizeof(Server));
+   if (!_server_global_object)
+     return NULL;
 
    server = server_self();
 
@@ -312,52 +359,21 @@ server_init(uint16_t port)
      }
 
    server->sockets = calloc(1, server->poll_array_size * sizeof(struct pollfd));
+   if (!server->sockets)
+     return NULL;
 
    for (i = 0; i < server->poll_array_size; i++)
      {
         server->sockets[i].fd = -1;
      }
 
-   if ((server->sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-     {
-        exit(ERR_SOCKET_FAILED);
-     }
-
-   server->port = port;
-
-   memset(&servername, 0, sizeof(servername));
-   servername.sin_family = AF_INET;
-   servername.sin_port = htons(port);
-   servername.sin_addr.s_addr = INADDR_ANY;
-
-   if (setsockopt(server->sock, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr)) < 0)
-     {
-        exit(ERR_SETSOCKOPT_FAILED);
-     }
-
-   flags = fcntl(server->sock, F_GETFL, 0);
-   fcntl(server->sock, F_SETFL, O_NONBLOCK | flags);
-
-   if (bind(server->sock, (struct sockaddr *) &servername, sizeof(servername)) < 0)
-     {
-         exit(ERR_BIND_FAILED);
-     }
-   
-   if (listen(server->sock, 5) < 0)
-     {
-        exit(ERR_LISTEN_FAILED);
-     }
-
-   server->sockets[0].fd = server->sock;
-   server->sockets[0].events = POLLIN;
-   server->socket_count = 1;
+   server->clients = calloc(1, sizeof(struct pollfd) * server->poll_array_size);
+   if (!server->clients)
+     return NULL;
 
    server_fd_max_set();
    server_signal_actions_set();
    server_motd_path_set("./MOTD");
-
-   server->clients = calloc(1, sizeof(struct pollfd) * server->poll_array_size);
-
    server->enabled = true;
 
    /* Aliases */
@@ -369,7 +385,8 @@ server_init(uint16_t port)
 
    server->request_parse = &client_request;
 
-   server->run = &server_main_loop;
+   server->run = &server_run;
+   server->port_set = &server_port_set;
    server->accept_or_deny = &server_accept;
    server->sockets_check = &server_sockets_check;
    server->timeout_check = &clients_timeout_check;
@@ -377,5 +394,7 @@ server_init(uint16_t port)
    server->motd_send = &client_motd_client_send;
    server->help_send = &client_help_send;
    server->shutdown = &server_shutdown;
+
+   return server;
 }
 

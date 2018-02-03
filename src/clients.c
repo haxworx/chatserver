@@ -31,7 +31,7 @@ clients_add(Client **clients, int fd)
         return NULL;
      }
 
-   server->clients_added = true;
+   server->socket_count++;
 
    pfd = &sockets[socket_index];
    sockets[socket_index].fd = fd;
@@ -74,7 +74,7 @@ clients_del(Client **clients, Client *client)
    close(client->fd);
 
    client->pfd->fd = -1;
-   server->clients_deleted = true;
+   server->socket_count--;
  
    prev = NULL;
    c = clients[0];

@@ -39,7 +39,6 @@ typedef struct {
    int sockets_max;
 
    bool enabled;
-   bool clients_deleted, clients_added;
 
    const char *motd_path;
 
@@ -50,6 +49,7 @@ typedef struct {
    void (*shutdown)(void);
    void (*run)(void);
    void (*accept_or_deny)(void);
+   void (*port_set)(uint16_t port);
    bool (*timeout_check)(Client **clients);
    int (*client_read)(Client *client);
    bool (*motd_send)(Client *client);
