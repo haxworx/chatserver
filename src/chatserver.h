@@ -49,7 +49,7 @@ typedef struct {
    void (*shutdown)(void);
    void (*run)(void);
    void (*accept_or_deny)(void);
-   void (*port_set)(uint16_t port);
+   void (*port_set)(int port);
    bool (*timeout_check)(Client **clients);
    int (*client_read)(Client *client);
    bool (*motd_send)(Client *client);

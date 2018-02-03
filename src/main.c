@@ -26,7 +26,7 @@ int main(int argc, char **argv)
    server_port_set(atoi(argv[1]));
 
    printf("PID %d listening on port %d, maximum clients %d\n",
-          getpid(), server->port, server->sockets_max);
+          getpid(), server->port, server->sockets_max - 1);
 
    server_run();
 

@@ -6,7 +6,7 @@
 
 Server *server_new(void);
 Server *server_self(void);
-void server_port_set(uint16_t port);
+void server_port_set(int port);
 void server_sockets_purge(void);
 void server_shutdown(void);
 void server_accept(void);

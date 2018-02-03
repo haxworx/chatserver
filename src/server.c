@@ -22,11 +22,18 @@ _fd_max_get(void)
 }
 
 void
-server_port_set(uint16_t port)
+server_port_set(int port)
 {
    Server *server = server_self();
 
-   server->port = port;
+   if ((port <= 0) || (port > 65535))
+     {
+        server->port = 12345;
+     }
+   else
+     {
+        server->port = port;
+     }
 }
 
 static void
