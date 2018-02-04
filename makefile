@@ -7,7 +7,7 @@ SRC_DIR=src
 default: chatserver auth
 
 chatserver: $(OBJECTS)
-	$(CC) $(CFLAGS) *.o -o $(PROGRAM)
+	$(CC) $(CFLAGS) $(OBJECTS) -o $(PROGRAM)
 
 auth.o: $(SRC_DIR)/auth.c
 	$(CC) -c $(CFLAGS) $(SRC_DIR)/auth.c -o $@
@@ -24,5 +24,5 @@ auth:
 
 clean:
 	-rm $(PROGRAM)
+	-rm $(OBJECTS)
 	-rm $(PROGRAM_AUTH)
-	-rm *.o

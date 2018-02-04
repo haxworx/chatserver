@@ -40,7 +40,7 @@ typedef struct {
 
    bool enabled;
 
-   const char *motd_path;
+   char *motd;
 
    struct pollfd *sockets;
    int poll_array_size;

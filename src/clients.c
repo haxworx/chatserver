@@ -65,17 +65,20 @@ clients_add(Client **clients, int fd)
 void
 clients_del(Client **clients, Client *client)
 {
-   Server *server = server_self();
+   Server *server;
    Client *c, *prev;
    const char *goodbye = "Bye now!\r\n\r\n";
+
+   server = server_self();
+
+   server->socket_count--;
 
    write(client->fd, goodbye, strlen(goodbye));
    
    close(client->fd);
 
    client->pfd->fd = -1;
-   server->socket_count--;
- 
+
    prev = NULL;
    c = clients[0];
    while (c)
@@ -453,9 +456,11 @@ _client_data_free(Client *client)
 bool
 client_request(Client **clients, Client *client)
 {
+   Server *server;
    const char *request;
    bool success = true;
-   Server *server = server_self();
+
+   server = server_self();
 
    _client_data_trim(client);
 

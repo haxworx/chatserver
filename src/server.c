@@ -100,36 +100,17 @@ server_signal_actions_set(void)
      sigaction(SIGPIPE, &newaction, NULL);
 }
 
-void
-server_motd_path_set(const char *path)
-{
-   Server *server = server_self();
-   server->motd_path = path;
-}
-
-const char *
-server_motd_path_get(void)
-{
-   Server *server = server_self();
-
-   return server->motd_path;
-}
-
-char *
-server_motd_get()
+static char *
+_motd_get(const char *path)
 {
    FILE *f;
    struct stat st;
    int size;
    char buffer[4096];
    ssize_t bytes, total = 0;
-   static char *motd = NULL;
-   const char *path = server_motd_path_get();
+   char *motd;
 
    if (!path) return NULL;
-
-   if (motd) return motd;
-
 
    if (stat(path, &st) < 0)
      return NULL;
@@ -159,11 +140,31 @@ server_motd_get()
 }
 
 void
-server_sockets_check(void)
+server_motd_set(const char *path)
 {
    Server *server = server_self();
+
+   server->motd = _motd_get(path);
+}
+
+char *
+server_motd_get(void)
+{
+   Server *server = server_self();
+
+   return server->motd;
+}
+
+void
+server_sockets_check(void)
+{
+   Server *server;
+   struct pollfd *sockets;
    int i;
-   struct pollfd *sockets = server->sockets;
+
+   server = server_self();
+
+   sockets = server->sockets;
 
    server->socket_count = 0;
 
@@ -196,9 +197,11 @@ server_shutdown(void)
 void
 _server_listen(void)
 {
+   Server *server;
    struct sockaddr_in servername;
    int flags, reuseaddr = 1;
-   Server *server = server_self();
+
+   server = server_self();
 
    if ((server->sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
      {
@@ -380,7 +383,7 @@ server_new(void)
 
    server_fd_max_set();
    server_signal_actions_set();
-   server_motd_path_set("./MOTD");
+   server_motd_set("./MOTD");
    server->enabled = true;
 
    /* Aliases */
