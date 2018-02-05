@@ -156,28 +156,6 @@ server_motd_get(void)
 }
 
 void
-server_sockets_check(void)
-{
-   Server *server;
-   struct pollfd *sockets;
-   int i;
-
-   server = server_self();
-
-   sockets = server->sockets;
-
-   server->socket_count = 0;
-
-   for (i = 0; i < server->sockets_max; i++)
-     {
-        if (sockets[i].fd != -1)
-          {
-             server->socket_count++;
-          }
-     }
-}
-
-void
 server_shutdown(void)
 {
    Server *server;
@@ -397,8 +375,7 @@ server_new(void)
 
    server->run = &server_run;
    server->port_set = &server_port_set;
-   server->accept_or_deny = &server_accept;
-   server->sockets_check = &server_sockets_check;
+   server->accept = &server_accept;
    server->timeout_check = &clients_timeout_check;
    server->client_read = &client_read;
    server->motd_send = &client_motd_client_send;
