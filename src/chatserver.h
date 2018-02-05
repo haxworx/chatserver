@@ -12,6 +12,7 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <poll.h>
