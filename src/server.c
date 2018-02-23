@@ -355,7 +355,7 @@ server_new(void)
         server->sockets[i].fd = -1;
      }
 
-   server->clients = calloc(1, sizeof(struct pollfd) * server->poll_array_size);
+   server->clients = calloc(1, sizeof(Client *));
    if (!server->clients)
      return NULL;
 

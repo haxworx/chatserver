@@ -56,7 +56,7 @@ int main(void)
 
    guess = strchr(buf, ' ') + 1;
    if (guess && guess[0])
-     { 
+     {
         *end = '\0';
         end = strrchr(guess, '\r'); if (!end) end = strrchr(guess, '\n');
         if (end) *end = '\0';
